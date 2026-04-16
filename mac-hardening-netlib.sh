@@ -16,8 +16,42 @@ warn() { echo -e "${YELLOW}[!]${NC} $1"; }
 err()  { echo -e "${RED}[✗]${NC} $1"; }
 info() { echo -e "${CYAN}[i]${NC} $1"; }
 
-source ./mac-hardening-netlib.sh
-resolve_brew_prefix 
+# Cancel with an error message
+die() { err "$1"; exit 1; }
+
+ask() {
+    local PROMPT="$1" VAR="$2"
+    if [[ -t 0 ]]; then
+        read -rp "    ${PROMPT} (y/N): " "$VAR"
+    else
+        warn "Non-interactive — skipping: $PROMPT"
+        eval "$VAR=N"
+    fi
+}
+
+# ──────────────────────────────────────────
+# INSTALL FORMULA
+# ──────────────────────────────────────────
+install_formula() {
+    local pkg="$1"
+    if brew list --formula --versions "$pkg" &>/dev/null; then
+        warn "${pkg} already installed: $(brew list --formula --versions "$pkg")"
+        ask "Reinstall ${pkg}?" CONFIRM
+        [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]] \
+            && brew reinstall "$pkg" \
+            || { log "Skipping ${pkg}."; return 0; }
+    else
+        log "Installing ${pkg}..."
+        brew install "$pkg" || { err "Failed to install ${pkg}!"; return 1; }
+    fi
+}
+
+resolve_brew_prefix() {
+  if [[ -z "${BREW_PREFIX:-}" ]]; then
+    BREW_PREFIX=$(brew --prefix 2>/dev/null) || die "Homebrew not found!"
+    export BREW_PREFIX
+  fi
+} 
 
 # ──────────────────────────────────────────
 # DNSCRYPT-PROXY
@@ -523,7 +557,8 @@ main() {
 }
 
 # If the file is run directly (rather than via `source`), open the menu
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+# Check if we're being sourced by testing if $0 is the script name
+if [[ "${0##*/}" == "mac-hardening-netlib.sh" ]]; then
   main
 fi
 

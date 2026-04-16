@@ -372,7 +372,7 @@ echo ""
 case "$NET_CHOICE" in
   1)
     log "Running VPN Daily profile..."
-    bash "$SCRIPT_DIR/profile-vpn-daily.sh"
+    bash "$SCRIPT_DIR/vpn_daily.sh"
     ;;
   2)
     log "Running Paranoid Tor profile..."
@@ -394,7 +394,6 @@ echo "  ╔═══════════════════════
 echo "  ║       Base hardening completed       ║"
 echo "  ╚══════════════════════════════════════╝"
 echo ""
-
 echo ""
 echo "  ╔══════════════════════════════════════╗"
 echo "  ║          MANUAL STEPS REMAIN         ║"
@@ -403,14 +402,11 @@ info "1.  Quad9 DNS profile (если не установлен):"
 echo "      https://docs.quad9.net/assets/mobileconfig/Quad9_Secured_DNS_over_HTTPS_ECS_20260119.mobileconfig"
 info "2.  OpenVPN client:      https://openvpn.net/client/"
 info "3.  VPN check:      https://timbrica.com/en/vpn-checker"
-info "4.  DNS leak test:      https://www.dnsleaktest.com/results.html
+info "4.  DNS leak test:      https://www.dnsleaktest.com/results.html"
 info "5.  Pareto Security:     https://paretosecurity.com/apps"
 info "6.  Lynis audit:         sudo lynis audit system"
 info "7.  Package CVE scan:    brew vulns"
 info "8.  Python CVE scan:     pip-audit"
 info "9.  CIS Benchmark:       open /Applications/Mergen.app"
 info "10. Proxy toggle log:    tail -f /var/log/proxy-toggle.log"
-echo ""
-
-echo ""
-log "Base hardening + selected network scenario completed. Stay paranoid. 🔒"
+info "Base hardening + selected network scenario completed. Stay paranoid. 🔒"

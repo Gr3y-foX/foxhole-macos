@@ -114,6 +114,6 @@ main() {
   done
 }
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+if [[ "${0##*/}" == "vpn_daily.sh" ]]; then
   main
 fi
