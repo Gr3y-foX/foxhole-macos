@@ -45,6 +45,73 @@ ask() {
 }
 
 # ──────────────────────────────────────────
+# BACKUP — Creating a snapshot before hardening
+# ──────────────────────────────────────────
+NET_BACKUP_DIR="${HOME}/.foxhole/backups/$(date +%Y%m%d_%H%M%S)"
+
+create_net_backup() {
+  log "Creating pre-hardening backup snapshot..."
+  mkdir -p "$NET_BACKUP_DIR" \
+    || { warn "Cannot create backup dir: ${NET_BACKUP_DIR}"; return 1; }
+
+  # 1. /etc/pf.conf
+  if [[ -f /etc/pf.conf ]]; then
+    sudo cp /etc/pf.conf "${NET_BACKUP_DIR}/pf.conf" \
+      && log "  [✓] /etc/pf.conf"
+  else
+    warn "  [–] /etc/pf.conf not found — skipped"
+  fi
+
+  # 2. /etc/hosts
+  if [[ -f /etc/hosts ]]; then
+    sudo cp /etc/hosts "${NET_BACKUP_DIR}/hosts" \
+      && log "  [✓] /etc/hosts"
+  else
+    warn "  [–] /etc/hosts not found — skipped"
+  fi
+
+  # 3. System proxies (all network services)> 
+  local PROXY_DUMP="${NET_BACKUP_DIR}/network_proxies.txt"
+  {
+    echo "# Network proxy snapshot — $(date)"
+    echo "# Restore: networksetup -setwebproxy <service> <host> <port>"
+    echo ""
+    networksetup -listallnetworkservices 2>/dev/null | tail -n +2 | grep -v '^\*' \
+    | while IFS= read -r SVC; do
+        echo "=== $SVC ==="
+        networksetup -getwebproxy        "$SVC" 2>/dev/null
+        networksetup -getsecurewebproxy  "$SVC" 2>/dev/null
+        networksetup -getproxybypassdomains "$SVC" 2>/dev/null
+        echo ""
+      done
+  } > "$PROXY_DUMP"
+  log "  [✓] Network proxy settings → ${PROXY_DUMP}"
+
+  # 4. dnscrypt-proxy status (if installed)
+  if command -v brew &>/dev/null \
+     && brew list --formula dnscrypt-proxy &>/dev/null 2>&1; then
+    brew services list 2>/dev/null \
+      | grep dnscrypt > "${NET_BACKUP_DIR}/dnscrypt_status.txt" || true
+    log "  [✓] dnscrypt-proxy service status"
+  fi
+
+  # 5. Privoxy LaunchDaemon (if exists)
+  local PRIV_PLIST="/Library/LaunchDaemons/com.hardening.proxytoggle.plist"
+  if [[ -f "$PRIV_PLIST" ]]; then
+    sudo cp "$PRIV_PLIST" "${NET_BACKUP_DIR}/proxytoggle.plist" \
+      && log "  [✓] Privoxy LaunchDaemon plist"
+  fi
+
+  # Summary
+  echo ""
+  log "Backup saved to: ${NET_BACKUP_DIR}"
+  info "To restore manually:"
+  info "  sudo cp ${NET_BACKUP_DIR}/pf.conf /etc/pf.conf && sudo pfctl -f /etc/pf.conf"
+  info "  sudo cp ${NET_BACKUP_DIR}/hosts   /etc/hosts"
+  echo ""
+}
+
+# ──────────────────────────────────────────
 # INSTALL FORMULA
 # ──────────────────────────────────────────
 install_formula() {
@@ -93,7 +160,7 @@ enable_dnscrypt() {
   else
     log "Starting dnscrypt-proxy (user service)..."
     brew services start dnscrypt-proxy \
-      || die "dnscrypt-proxy start failed! DNS недоступен — прерываем."
+      || die "dnscrypt-proxy start failed! DNS is not available — aborting."
   fi
 
   sleep 2
@@ -496,32 +563,56 @@ reset_net_hardening() {
 main() {
   clear
   echo ""
-  echo "  ╔══════════════════════════════════════╗"
-  echo "  ║   macOS Security Hardening Netlib    ║"
-  echo "  ║           v1 · by Grey Fox           ║"
-  echo "  ║              ARM/M-chip              ║"
-  echo "  ╚══════════════════════════════════════╝"
+  echo "  ░██████████                      ░██                   ░██           "
+  echo "  ░██                              ░██                   ░██           "
+  echo "  ░██         ░███████  ░██    ░██ ░████████   ░███████  ░██  ░███████ "
+  echo "  ░█████████ ░██    ░██  ░██  ░██  ░██    ░██ ░██    ░██ ░██ ░██    ░██"
+  echo "  ░██        ░██    ░██  ░██  ░██  ░██    ░██ ░██    ░██ ░██ ░██       "
+  echo "  ░██         ░███████  ░██    ░██ ░██    ░██  ░███████  ░██  ░███████ "
   echo ""
-  warn "This script modifies network-related system settings. Sudo may be required."
+  echo "  ╔══════════════════════════════════════════╗"
+  echo "  ║       macOS Network Hardening Netlib     ║"
+  echo "  ║            v0.16  ·  by Gr3y-foX         ║"
+  echo "  ║       ARM/M-chip  |  strict mode         ║"
+  echo "  ╠══════════════════════════════════════════╣"
+  echo "  ║  module: netlib   |  mode: interactive   ║"
+  echo "  ╠══════════════════════════════════════════╣"
+  echo "  ║  [!] Unauthorized use is prohibited.     ║"
+  echo "  ╚══════════════════════════════════════════╝"
+  echo ""
+  warn "This module modifies network settings. Sudo may be required."
+  info "Tip: usually sourced from profiles (vpn_daily / paranoid_tor)."
+  echo ""
   ask "Continue?" CONFIRM
   [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]] && { echo "Aborted."; exit 0; }
   echo ""
-
-  # Just a quick reminder that this is a module, not a full installer
-  info "Tip: This file is usually loaded from profiles (paranoid_tor / vpn_daily)."
-  info "You can now manually load individual blocks for testing."
+  
+# ── Snapshot before any changes ──────────
+ask "Create backup snapshot before proceeding?" CONFIRM_BK
+if [[ "$CONFIRM_BK" == "y" || "$CONFIRM_BK" == "Y" ]]; then
+  create_net_backup
+else
+  warn "Skipping backup — proceeding without snapshot."
   echo ""
+fi
 
   while true; do
-    echo "Select action:"
-    echo "  [1] Install + enable dnscrypt-proxy (user service)"
-    echo "  [2] Enable PF DNS leak lock (53/853 v4/v6 BLOCKED)"
-    echo "  [3] Update /etc/hosts with StevenBlack blocklist"
-    echo "  [4] Install Privoxy + configure VPN auto-switch"
-    echo "  [5] Reset network hardening (dnscrypt/PF/Privoxy/proxy)"
-    echo "  [6] Quit"
+    echo "  ╔══════════════════════════════════════════╗"
+    echo "  ║           Network Hardening Menu         ║"
+    echo "  ╠══════════════════════════════════════════╣"
+    echo "  ║  [1]  Install + enable dnscrypt-proxy    ║"
+    echo "  ║  [2]  Enable PF DNS leak lock            ║"
+    echo "  ║       (ports 53/853 — IPv4/IPv6 BLOCKED) ║"
+    echo "  ║  [3]  Update /etc/hosts blocklist        ║"
+    echo "  ║       (StevenBlack)                      ║"
+    echo "  ║  [4]  Install Privoxy + VPN auto-switch  ║"
+    echo "  ║  [5]  Reset network hardening            ║"
+    echo "  ║       (dnscrypt / PF / Privoxy / proxy)  ║"
+    echo "  ╠══════════════════════════════════════════╣"
+    echo "  ║  [6]  Quit                               ║"
+    echo "  ╚══════════════════════════════════════════╝"
     echo ""
-    read -rp "Choice (1-6): " CHOICE
+    read -rp "  Choice (1-6): " CHOICE
     echo ""
 
     case "$CHOICE" in
