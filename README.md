@@ -2,7 +2,16 @@
 
 Advanced hardening toolkit for macOS (Intel + Apple Silicon) inspired by [drduh/macOS-Security-and-Privacy-Guide](https://github.com/drduh/macOS-Security-and-Privacy-Guide).
 
-- Warning: This project is made by student of cybersecurity. its not enterprise level, dont gurantee any "full security" or "100% protection" or "Paranoid mode safe". Please use it at your own risk. If u has any recommendation or feedback, please let me know, its deeply appretiated.
+## Warning
+ This project is made by student of cybersecurity. its not enterprise level, dont gurantee any "full security" or "100% protection" or "Paranoid mode safe". Please use it at your own risk. If u has any recommendation or feedback, please let me know, its deeply appretiated.
+
+## Attribution
+Based on [macOS Security and Privacy Guide](https://github.com/drduh/macOS-Security-and-Privacy-Guide)
+by [@drduh](https://github.com/drduh) — [MIT License](https://opensource.org/licenses/MIT).
+
+## License
+This project is licensed under **GNU GPL v3**.
+See [LICENSE](./LICENSE) for details.
 
 The goal is a **safe, modular setup**:
 

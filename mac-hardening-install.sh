@@ -1,10 +1,29 @@
 #!/bin/bash
+
+# macos-sec-harder-26
+# Copyright (C) 2026 Saimon Alvarez (Gr3y-foX)
+# Based on drduh/macOS-Security-and-Privacy-Guide (MIT)
+# Licensed under GNU GPL v3 — see LICENSE for details
+
 # ============================================================
 #  macOS Advanced Security Hardening Script v5
 #  Based on: github.com/drduh/macOS-Security-and-Privacy-Guide
 #  Author: Grey Fox
 #  Changes v5: ARM/M-chip paths, strict error handling,
-#              IPv6 PF rules, Wazuh IDS, brew service fixes
+#              brew service fixes
+#  Services used:
+#    - brew
+#    - dnscrypt-proxy
+#    - StevenBlack Blocklist
+#    - cask
+#    - LuLu Firewall
+#    - BlockBlock
+#    - KnockKnock
+#    - DoNotDisturb
+#    - lynis
+#    - Pipx audit
+#    - brew-vulns
+#    - Mergen
 # ============================================================
 
 # Do not run as root
