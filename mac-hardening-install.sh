@@ -1,14 +1,14 @@
 #!/bin/bash
 
-# macos-sec-harder-26
-# Copyright (C) 2026 Saimon Alvarez (Gr3y-foX)
+# foxhole-macos
+# Copyright (C) 2026 Gr3y-foX
 # Based on drduh/macOS-Security-and-Privacy-Guide (MIT)
 # Licensed under GNU GPL v3 — see LICENSE for details
 
 # ============================================================
 #  macOS Advanced Security Hardening Script v5
 #  Based on: github.com/drduh/macOS-Security-and-Privacy-Guide
-#  Author: Grey Fox
+#  Author: Gr3y-foX
 #  Changes v5: ARM/M-chip paths, strict error handling,
 #              brew service fixes
 #  Services used:

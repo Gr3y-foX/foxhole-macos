@@ -1,5 +1,10 @@
 #!/bin/bash
 
+# foxhole-macos
+# Copyright (C) 2026 Gr3y-foX
+# Based on drduh/macOS-Security-and-Privacy-Guide (MIT)
+# Licensed under GNU GPL v3 — see LICENSE for details
+
 # VPN Daily profile — a simple wrapper around a commercial VPN (ClearVPN/OpenVPN)
 # It is assumed that:
 #   - the basic hardening installer has already been run
