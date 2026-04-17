@@ -1,15 +1,34 @@
 #!/bin/bash
 
-# foxhole-macos
-# Copyright (C) 2026 Gr3y-foX
-# Based on drduh/macOS-Security-and-Privacy-Guide (MIT)
-# Licensed under GNU GPL v3 — see LICENSE for details
-
-# VPN Daily profile — a simple wrapper around a commercial VPN (ClearVPN/OpenVPN)
-# It is assumed that:
-#   - the basic hardening installer has already been run
-#   - mac-hardening-netlib.sh is located nearby and contains:
-#       install_dnscrypt, enable_dnscrypt, disable_dnscrypt, reset_net_hardening
+# foxhole-macos — VPN Daily Profile
+#
+# File:    vpn-profile.sh
+# Version: 0.15 (2026)
+# Author:  Gr3y-foX
+# Based on: drduh/macOS-Security-and-Privacy-Guide (MIT)
+# License: GNU GPL v3 — see LICENSE for details
+#
+# Overview:
+#   Simple, non-destructive profile for everyday VPN usage with
+#   commercial VPN clients (e.g. ClearVPN, OpenVPN).
+#   Focuses on safe DNS handling without touching /etc/pf.conf
+#   or implementing PF-based kill switches.
+#
+# Assumptions:
+#   - The base hardening installer (mac-hardening-install.sh) was
+#     already executed on this system.
+#   - mac-hardening-netlib.sh is available in the same directory
+#     and provides:
+#       * install_dnscrypt
+#       * enable_dnscrypt
+#       * disable_dnscrypt
+#       * reset_net_hardening
+#
+# Behavior:
+#   - Allows enabling dnscrypt-proxy when *not* using a VPN.
+#   - Disables dnscrypt-proxy when a VPN is active, letting the
+#     VPN client fully control DNS.
+#   - Provides a reset option to undo DNS/proxy-related changes.
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 RED='\033[0;31m';   CYAN='\033[0;36m'; NC='\033[0m'

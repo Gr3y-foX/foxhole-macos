@@ -1,19 +1,28 @@
 #!/bin/bash
-
-# foxhole-macos
-# Copyright (C) 2026 Gr3y-foX
-# Based on drduh/macOS-Security-and-Privacy-Guide (MIT)
-# Licensed under GNU GPL v3 — see LICENSE for details
-
-# ============================================================
-#  macOS Advanced Security Hardening Script v1
-#  this module work on setting netlibs
-#  Based on: github.com/drduh/macOS-Security-and-Privacy-Guide
-#  Author: Grey Fox
-#  Changes v1: ARM/M-chip paths, strict error handling,
-#  Services used: dnscrypt-proxy, PF - dns leak prevention,
-#  StevenBlack Blocklist, Privoxy
-# ============================================================
+#
+# Foxhole-macos — macOS Network Hardening Library
+#
+# File:    mac-hardening-netlib.sh
+# Version: 0.15 (2026)
+# Author:  Gr3y-foX
+# Based on: drduh/macOS-Security-and-Privacy-Guide (MIT)
+# License: GNU GPL v3 — see LICENSE for details
+#
+# Overview:
+#   Reusable network hardening primitives for macOS:
+#     - dnscrypt-proxy (encrypted DNS as user-level service)
+#     - PF DNS leak lock anchors
+#     - /etc/hosts blocklist (StevenBlack)
+#     - Privoxy with VPN‑aware auto‑proxy switching
+#
+# Usage:
+#   This script is primarily intended to be sourced from profile scripts
+#   (e.g. profile-vpn-daily.sh), but can also be run directly to access
+#   its interactive menu.
+#
+# Notes for v0.15:
+#   - Initial split of network logic into a dedicated netlib module
+#   - ARM / Apple Silicon aware paths and stricter error handling
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 RED='\033[0;31m';   CYAN='\033[0;36m'; NC='\033[0m'

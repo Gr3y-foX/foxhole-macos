@@ -1,30 +1,25 @@
 #!/bin/bash
-
-# foxhole-macos
-# Copyright (C) 2026 Gr3y-foX
-# Based on drduh/macOS-Security-and-Privacy-Guide (MIT)
-# Licensed under GNU GPL v3 — see LICENSE for details
-
-# ============================================================
-#  macOS Advanced Security Hardening Script v5
-#  Based on: github.com/drduh/macOS-Security-and-Privacy-Guide
-#  Author: Gr3y-foX
-#  Changes v5: ARM/M-chip paths, strict error handling,
-#              brew service fixes
-#  Services used:
-#    - brew
-#    - dnscrypt-proxy
-#    - StevenBlack Blocklist
-#    - cask
-#    - LuLu Firewall
-#    - BlockBlock
-#    - KnockKnock
-#    - DoNotDisturb
-#    - lynis
-#    - Pipx audit
-#    - brew-vulns
-#    - Mergen
-# ============================================================
+#
+# Foxhole-macos — macOS Advanced Security Hardening Script
+#
+# Version: 0.15 (2026)
+# Author:  Gr3y-foX
+# Based on: drduh/macOS-Security-and-Privacy-Guide (MIT)
+# License: GNU GPL v3 — see LICENSE for details
+#
+# Overview:
+#   Base hardening installer for macOS (Intel + Apple Silicon).
+#   Focuses on local system security and safe defaults, without
+#   breaking basic network connectivity.
+#
+# Includes (via Homebrew / casks where applicable):
+#   - Objective-See tools (LuLu, BlockBlock, KnockKnock, Do Not Disturb)
+#   - lynis, pipx + pip-audit, brew-vulns, Mergen (optional)
+#   - dnscrypt-proxy, StevenBlack hosts blocklist (via netlib / profiles)
+#
+# Notes for v0.15:
+#   - Stricter error handling and safer defaults
+#   - Fixed brew service handling and checks
 
 # Do not run as root
 if [[ "$EUID" -eq 0 ]]; then
