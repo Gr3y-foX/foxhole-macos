@@ -838,6 +838,11 @@ apply_defaults() {
     [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]] \
         && killall Finder 2>/dev/null || true
 
+    echo ""
+    echo "  ╔══════════════════════════════════════╗"
+    echo "  ║   ✓  macOS Defaults applied          ║"
+    echo "  ╚══════════════════════════════════════╝"
+    echo ""
     log "Defaults applied."
 }
 
@@ -884,8 +889,9 @@ harden_power_management() {
 check_gatekeeper_filevault() {
     echo ""
     echo "  ╔══════════════════════════════════════════╗"
-    echo "  ║   [ MODULE 8/8: Gatekeeper & FileVault ] ║"
+    echo "  ║   [ CHECK: Gatekeeper + FileVault ]      ║"
     echo "  ╚══════════════════════════════════════════╝"
+    echo ""
     echo ""
     log "Checking Gatekeeper and FileVault status..."
 
