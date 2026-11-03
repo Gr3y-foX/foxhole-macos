@@ -2,10 +2,11 @@
 
 ## Branch / PR state
 - Work branch: `debug`. `main` is still v0.16.1. **Never push to main; work only on `debug`.**
-- Remote `debug` is at `e2f79f9`. Local `debug` has 3 more commits that are NOT pushed yet:
+- Remote `debug` is at `f59538b`, in sync with local. Pushed commits:
   - `e6730f3` fix(install): OverSight/Mergen downloads, brew vulns, Gatekeeper, SSH-aware firewall (VM suite 93/0/0)
   - `548c6e5` docs: plan and checkpoint after the installer run
-  - `<next>` WIP: `restore.sh` in net backups + T16 test (T16 NOT run in the VM yet)
+  - `f59538b` WIP: `restore.sh` in net backups + T16 test (T16 NOT run in the VM yet)
+- GitHub says the repo moved to `https://github.com/Gr3y-foX/foxhole-macos.git`. Update the remote when convenient; pushes to the old URL still work for now.
 - Push problem: the Intel Homebrew `git` (`/usr/local/bin/git`, Rosetta) hangs on github.com; `curl` works. Apple's native `arch -arm64 /usr/bin/git push -u origin debug` connects. Use that, or retry later.
 - **No PR opened.** Open one only when asked. PR text (ready to paste):
   - Title: `v0.17.3: PF DNS lock in com.apple/* child anchor, installer fixes, VM test suite`
