@@ -45,3 +45,12 @@ cover physical `en*` interfaces, but the "tunnels always pass" guarantee and hea
 The anchor now passes an explicit `utun0`–`utun15` list. T12 builds a tunnel in the VM (IPv4 on `utun3`,
 test address routed through it) and checks that DNS through it hits the `utun3` pass rule and that
 `vpn_active` reports a VPN.
+
+## Found by T13 — `proxy-toggle.sh` was never written on a clean Apple Silicon Mac
+
+`/usr/local/bin` does not exist there (only Intel Homebrew creates it). `sudo tee /usr/local/bin/proxy-toggle.sh`
+failed silently, the daemon was bootstrapped for a script that was not there, and the function still printed
+"LaunchDaemon loaded". Now the directory is created and a failed write stops the function.
+T13 runs the real generated toggle against the VM's `networksetup` with a stand-in listener on `127.0.0.1:8118`:
+ON without VPN, OFF with a `utun` IPv4 tunnel, back ON, OFF while nothing listens, idempotent repeats, clean disable.
+Suite: 81 passed, 0 failed, 0 skipped.

@@ -177,6 +177,35 @@ sudo ifconfig utun3 inet 10.99.0.1 delete >/dev/null 2>&1
 chk "no VPN detected after the tunnel is gone" '! vpn_active_probe'
 disable_pf_dns_lock >/dev/null 2>&1
 
+echo "== T13 Privoxy auto-switch: real proxy-toggle.sh + LaunchDaemon + networksetup (stand-in listener on :8118)"
+SVC=$(networksetup -listallnetworkservices | tail -n +2 | grep -v '^\*' | head -1)
+wproxy() { networksetup -getwebproxy "$SVC" | awk -F': ' '$1=="Enabled"{print $2}'; }
+sproxy() { networksetup -getsecurewebproxy "$SVC" | awk -F': ' '$1=="Enabled"{print $2}'; }
+toggle() { sudo bash /usr/local/bin/proxy-toggle.sh; }
+perl -MIO::Socket::INET -e '$s=IO::Socket::INET->new(LocalAddr=>"127.0.0.1",LocalPort=>8118,Listen=>5,ReuseAddr=>1) or die; sleep 900' >/dev/null 2>&1 &
+LPID=$!; sleep 1
+enable_privoxy_vpn_autoswitch 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | grep -E "✗|\[!\]|loopback|exposed|not listening|loaded"
+chk "toggle script root:wheel 755" '[[ "$(stat -f "%Su:%Sg %Lp" /usr/local/bin/proxy-toggle.sh)" == "root:wheel 755" ]]'
+chk "daemon bootstrapped" 'sudo launchctl print system/com.hardening.proxytoggle >/dev/null 2>&1'
+chk "no VPN + Privoxy listening -> web and secure web proxy ON" '[[ "$(wproxy)" == Yes && "$(sproxy)" == Yes ]]'
+chk "proxy points at 127.0.0.1:8118" 'networksetup -getwebproxy "$SVC" | grep -q "Server: 127.0.0.1" && networksetup -getwebproxy "$SVC" | grep -q "Port: 8118"'
+W1=$(wc -l < /var/log/proxy-toggle.log); toggle; toggle
+chk "repeat runs change nothing (idempotent, log does not grow)" '[[ "$(wc -l < /var/log/proxy-toggle.log)" == "$W1" ]]'
+sudo ifconfig utun3 inet 10.99.0.1 10.99.0.2 netmask 255.255.255.255 up; toggle
+chk "VPN (utun IPv4) -> proxy OFF" '[[ "$(wproxy)" == No && "$(sproxy)" == No ]]'
+sudo ifconfig utun3 inet 10.99.0.1 delete; toggle
+chk "VPN gone -> proxy back ON" '[[ "$(wproxy)" == Yes ]]'
+kill $LPID 2>/dev/null; wait $LPID 2>/dev/null; toggle
+chk "Privoxy not listening -> proxy OFF (never point at a dead port)" '[[ "$(wproxy)" == No && "$(sproxy)" == No ]]'
+chk "toggle logged the dead-Privoxy case" 'grep -q "Privoxy is not listening" /var/log/proxy-toggle.log'
+perl -MIO::Socket::INET -e '$s=IO::Socket::INET->new(LocalAddr=>"127.0.0.1",LocalPort=>8118,Listen=>5,ReuseAddr=>1) or die; sleep 900' >/dev/null 2>&1 &
+LPID=$!; sleep 1; toggle
+chk "Privoxy back -> proxy ON again" '[[ "$(wproxy)" == Yes ]]'
+disable_privoxy_autoswitch >/dev/null 2>&1
+kill $LPID 2>/dev/null; wait $LPID 2>/dev/null
+chk "disable: daemon, plist and script gone" '! sudo launchctl print system/com.hardening.proxytoggle >/dev/null 2>&1 && ! test -e /Library/LaunchDaemons/com.hardening.proxytoggle.plist && ! test -e /usr/local/bin/proxy-toggle.sh'
+chk "disable: system proxies OFF" '[[ "$(wproxy)" == No && "$(sproxy)" == No ]]'
+
 echo "== T10 vpn_daily.sh menu from another cwd (driven by expect: ask() needs a tty)"
 cat > /tmp/vd.exp <<'EXP'
 set timeout 30
