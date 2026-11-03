@@ -6,6 +6,8 @@
 # Usage:  bash tests/vm/run.sh [--reset]
 #   --reset   recreate foxhole-test from foxhole-clean before running
 #
+# Env:   FOXHOLE_VM_NET=bridged   boot with --net-bridged=en0 (real internet)
+#
 # Needs: tart, sshpass, VM image admin/admin (Cirrus Labs vanilla image).
 set -euo pipefail
 
@@ -35,10 +37,26 @@ if [[ "${1:-}" == "--reset" ]]; then
     tart set "$VM" --cpu 4 --memory 4096
 fi
 
-tart run --no-graphics --no-audio --no-clipboard "$VM" >/dev/null 2>&1 &
-trap 'tart stop "$VM" >/dev/null 2>&1 || true' EXIT
+# FOXHOLE_VM_NET=bridged gives the VM real internet (default NAT is blocked by a
+# host VPN kill switch such as Mullvad Lockdown). It then has a LAN address.
+NET_ARGS=(); IP_ARGS=(--wait 120)
+if [[ "${FOXHOLE_VM_NET:-nat}" == "bridged" ]]; then
+    NET_ARGS=(--net-bridged="${FOXHOLE_VM_BRIDGE:-en0}"); IP_ARGS=(--resolver arp --wait 120)
+fi
+tart run --no-graphics --no-audio --no-clipboard ${NET_ARGS[@]+"${NET_ARGS[@]}"} "$VM" >/dev/null 2>&1 &
+# Graceful stop: an abrupt `tart stop` can lose the last file operations (e.g. the
+# final cleanup), leaving the next run with stale state.
+stop_vm() {
+    ssh_vm 'sync; sudo shutdown -h now' >/dev/null 2>&1 || true
+    for _ in $(seq 1 30); do
+        tart list 2>/dev/null | awk -v vm="$VM" '$2 == vm && $NF == "running"' | grep -q . || return 0
+        sleep 2
+    done
+    tart stop "$VM" >/dev/null 2>&1 || true
+}
+trap stop_vm EXIT
 
-IP=$(tart ip "$VM" --wait 120)
+IP=$(tart ip "$VM" "${IP_ARGS[@]}")
 echo "VM ${VM} at ${IP}; waiting for SSH..."
 for _ in $(seq 1 30); do
     nc -z -G2 "$IP" 22 2>/dev/null && break

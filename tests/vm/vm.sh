@@ -6,6 +6,7 @@
 #         bash tests/vm/vm.sh ssh 'cmd ...'  run a command in the VM
 #         bash tests/vm/vm.sh down           stop the VM
 #         bash tests/vm/vm.sh reset          recreate foxhole-test from foxhole-clean
+# Env:    FOXHOLE_VM_NET=bridged  boot with --net-bridged=en0 (real internet)
 set -euo pipefail
 
 if [[ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" == "1" ]]; then
@@ -22,13 +23,17 @@ SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
 
 [[ -d "$TART_HOME" ]] || { echo "TART_HOME not found: $TART_HOME (SSD unplugged?)"; exit 1; }
 
-vm_ip() { tart ip "$VM" --wait "${1:-5}" 2>/dev/null; }
+NET_ARGS=(); IP_ARGS=()
+if [[ "${FOXHOLE_VM_NET:-nat}" == "bridged" ]]; then
+    NET_ARGS=(--net-bridged="${FOXHOLE_VM_BRIDGE:-en0}"); IP_ARGS=(--resolver arp)
+fi
+vm_ip() { tart ip "$VM" ${IP_ARGS[@]+"${IP_ARGS[@]}"} --wait "${1:-5}" 2>/dev/null; }
 ssh_vm() { sshpass -p admin ssh "${SSH_OPTS[@]}" "admin@$(vm_ip)" "$@"; }
 
 case "${1:-}" in
     up)
         if ! tart list 2>/dev/null | awk -v vm="$VM" '$2 == vm && $NF == "running"' | grep -q .; then
-            nohup tart run --no-graphics --no-audio --no-clipboard "$VM" >/dev/null 2>&1 &
+            nohup tart run --no-graphics --no-audio --no-clipboard ${NET_ARGS[@]+"${NET_ARGS[@]}"} "$VM" >/dev/null 2>&1 &
         fi
         IP=$(vm_ip 120)
         for _ in $(seq 1 40); do nc -z -G2 "$IP" 22 2>/dev/null && break; sleep 3; done
@@ -45,6 +50,12 @@ case "${1:-}" in
         ssh_vm "$@"
         ;;
     down)
+        # graceful first: an abrupt stop can lose the last file operations
+        ssh_vm 'sync; sudo shutdown -h now' >/dev/null 2>&1 || true
+        for _ in $(seq 1 30); do
+            tart list 2>/dev/null | awk -v vm="$VM" '$2 == vm && $NF == "running"' | grep -q . || exit 0
+            sleep 2
+        done
         tart stop "$VM" 2>/dev/null || true
         ;;
     reset)
