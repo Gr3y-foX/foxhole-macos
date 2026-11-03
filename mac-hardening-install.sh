@@ -22,6 +22,12 @@
 #   - Fixed brew service handling and checks
 
 # Do not run as root
+# Re-exec natively if started from a Rosetta (x86_64) shell, e.g. an
+# Intel-only bash in /usr/local/bin; arch and brew-prefix checks need arm64.
+if [[ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" == "1" ]]; then
+    exec arch -arm64 /bin/bash "$0" "$@"
+fi
+
 if [[ "$EUID" -eq 0 ]]; then
     echo "Do not run as root. Homebrew will break."; exit 1
 fi
