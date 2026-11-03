@@ -15,7 +15,7 @@
 # Includes (via Homebrew / casks where applicable):
 #   - Objective-See tools (LuLu, BlockBlock, KnockKnock, Do Not Disturb)
 #   - lynis, pipx + pip-audit, brew-vulns, Mergen (optional)
-#   - dnscrypt-proxy, StevenBlack hosts blocklist (via netlib / profiles)
+#   - PF DNS leak lock, StevenBlack hosts blocklist, Privoxy (via netlib / profiles)
 #
 # Notes for v0.15:
 #   - Stricter error handling and safer defaults
@@ -57,10 +57,11 @@ die() { err "$1"; exit 1; }
 ask() {
     local PROMPT="$1" VAR="$2"
     if [[ -t 0 ]]; then
+        # shellcheck disable=SC2229  # reads into the variable *named* by $VAR
         read -rp "    ${PROMPT} (y/N): " "$VAR"
     else
         warn "Non-interactive — skipping: $PROMPT"
-        eval "$VAR=N"
+        printf -v "$VAR" '%s' 'N'
     fi
 }
 
@@ -233,7 +234,6 @@ SECURITY_CASKS=(
 # List of formula-checking tools
 SECURITY_FORMULAS=(
   "lynis"
-  "dnscrypt-proxy"
   "privoxy"
 )
 
@@ -978,7 +978,7 @@ ask "Run network module now?" CONFIRM_NET
 if [[ "$CONFIRM_NET" != "y" && "$CONFIRM_NET" != "Y" ]]; then
   log "Network profiles can be run later from directory: $SCRIPT_DIR"
   echo "  - mac-hardening-netlib.sh"
-  echo "  - profile-vpn-daily.sh"
+  echo "  - vpn_daily.sh"
   echo "  - profile-paranoid-tor.sh"
   echo ""
   log "Done. Stay paranoid. 🔒"
@@ -989,7 +989,7 @@ echo ""
 echo "Select network scenario:"
 echo "  [1] VPN Daily profile (ClearVPN / OpenVPN, without complex rules)"
 echo "  [2] Paranoid Tor profile (maximum anonymity, complex scheme)"
-echo "  [3] Open mac-hardening-netlib menu (manual blocks dnscrypt/PF/Privoxy)"
+echo "  [3] Open mac-hardening-netlib menu (manual blocks PF/hosts/Privoxy)"
 echo "  [4] Do nothing now"
 echo ""
 read -rp "Choice (1-4): " NET_CHOICE
