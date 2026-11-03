@@ -259,6 +259,7 @@ rm -f /tmp/gk_on
 
 echo "== T16 create_net_backup + restore.sh"
 cp /etc/hosts /tmp/hosts.t16
+cp /etc/pf.conf /tmp/pf.conf.t16   # pf.conf as it is when the backup is taken (T7 leaves a blank line vs the baseline)
 create_net_backup > /tmp/t16-backup.out 2>&1
 BK=$(ls -d "$HOME"/.foxhole/backups/* | tail -1)
 chk "backup holds hosts, pf.conf, system-dns.txt, network_proxies.txt" 'test -f $BK/hosts && test -f $BK/pf.conf && test -f $BK/system-dns.txt && test -f $BK/network_proxies.txt'
@@ -270,7 +271,7 @@ chk "restore.sh refuses to run without root" '! bash $BK/restore.sh >/dev/null 2
 sudo bash $BK/restore.sh > /tmp/t16-restore.out 2>&1; RR=$?
 chk "restore.sh exits 0 and restores /etc/hosts byte-for-byte" '[[ $RR -eq 0 ]] && cmp -s /etc/hosts /tmp/hosts.t16'
 chk "restored /etc/hosts is root:wheel 644" '[[ "$(stat -f "%Su:%Sg %Lp" /etc/hosts)" == "root:wheel 644" ]]'
-chk "pf.conf unchanged by restore" 'cmp -s /etc/pf.conf /tmp/pf.conf.baseline'
+chk "pf.conf restored to its state at backup time" 'cmp -s /etc/pf.conf /tmp/pf.conf.t16'
 rm -rf "$HOME/.foxhole"
 
 echo "== T10 vpn_daily.sh menu from another cwd (driven by expect: ask() needs a tty)"
