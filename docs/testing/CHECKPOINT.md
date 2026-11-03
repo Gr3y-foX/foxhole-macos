@@ -1,48 +1,38 @@
-# Checkpoint — 2026-11-03 night (resume here)
+# Checkpoint — 2026-11-03 (resume here)
 
-## State
-- Branch `debug` (v0.17.3) — see `git log` for the head; everything below is committed and pushed unless noted. `main` is still v0.16.1. **Work only on `debug`.** No PR exists (checked via GitHub API); create one only when the user asks.
-- Uncommitted on purpose: `CLAUDE.md`, `AGENTS.md` (the user's own edits — don't touch). Untracked: `.DS_Store`, `.claude/`, `free-claude-code/`, three partial logs `vm-test-…_1706*/1708*/1709*.log` (runs cut off by SSH drops).
-- Work plan with checkboxes: `docs/testing/PLAN.md`. Changelogs: `docs/v 0.17/netlib_v0.17.2-changes.md` (second pass), `docs/v 0.17/netlib_v0.17.3.md`.
-- Last VM run: **93 pass / 0 fail / 0 skip** with `FOXHOLE_VM_NET=bridged` (`vm-test-2026-11-03_193350.log`; 84/0/0 ×3 before the installer tests). Without bridged mode the VM has no egress and 4 internet checks skip (49/0/4).
+## Branch / PR state
+- Work branch: `debug`. `main` is still v0.16.1. **Never push to main; work only on `debug`.**
+- Remote `debug` is at `e2f79f9`. Local `debug` has 3 more commits that are NOT pushed yet:
+  - `e6730f3` fix(install): OverSight/Mergen downloads, brew vulns, Gatekeeper, SSH-aware firewall (VM suite 93/0/0)
+  - `548c6e5` docs: plan and checkpoint after the installer run
+  - `<next>` WIP: `restore.sh` in net backups + T16 test (T16 NOT run in the VM yet)
+- Push problem: the Intel Homebrew `git` (`/usr/local/bin/git`, Rosetta) hangs on github.com; `curl` works. Apple's native `arch -arm64 /usr/bin/git push -u origin debug` connects. Use that, or retry later.
+- **No PR opened.** Open one only when asked. PR text (ready to paste):
+  - Title: `v0.17.3: PF DNS lock in com.apple/* child anchor, installer fixes, VM test suite`
+  - Body: what changed (see `docs/v 0.17/netlib_v0.17.3.md`); VM suite `tests/vm/run.sh` 93 passed / 0 failed / 0 skipped with `FOXHOLE_VM_NET=bridged`; open items below.
 
-## What was done this session
-1. Housekeeping: confirmed B1 (`port = 53`) and the Rosetta guard were already committed (`77c92e6`); tested the guard with a throwaway script; moved the guard above the "Do not run as root" comment in the installer.
-2. Offline bug sweep (`01552ba`), found by reading the code and testing with stubbed `scutil`/`ifconfig`/`nc`/`networksetup`/`curl`:
-   - proxy-toggle `vpn_active` matched "(Disconnected)" → proxy never turned on; now exact "(Connected)" + `utun` with IPv4 (Mullvad/ClearVPN/OpenVPN), Tailscale ignored.
-   - `set_proxy` idempotent (writes touched its own WatchPath); never enables proxy while Privoxy isn't listening; `install_privoxy` now starts it (`brew services`).
-   - Privoxy exposure check used `0.0.0.0.8118` (macOS prints `*.8118`); bypass `forward` rules were CIDR (unsupported) → URL patterns; `disable_privoxy_autoswitch` also turns system proxies off.
-   - `update_hosts` downloads + validates (≥1000 entries) before touching `/etc/hosts`.
-   - Installer: dropped `dnscrypt-proxy` from `SECURITY_FORMULAS`, `ask` uses `printf -v`, script names fixed. shellcheck `-S warning` clean for install/netlib/vpn_daily.
-3. v0.17.3 (`841c492`), plan items 1.2–1.4, researched in the VM first:
-   - Rules load into `com.apple/foxhole.dnsleak` (child of the stock `com.apple/*` anchor) — `/etc/pf.conf` never edited, main ruleset never reloaded (Mullvad-safe).
-   - PF enabled with `pfctl -E` token (`/var/db/foxhole/pf.token`), released with `pfctl -X` on disable → PF returns to its prior state, stays on if another holder exists.
-   - Helper `/usr/local/libexec/foxhole-pf-dnslock start|stop|status` is the single path for enable/disable/boot daemon.
-   - `launchctl bootstrap/bootout system` for PF and Privoxy daemons (`_launchd_bootout`, `_launchd_bootstrap` with retry).
-   - Enable refuses if the main ruleset has no `anchor "com.apple/*"`; `_pf_legacy_cleanup` migrates old pf.conf-marker installs.
-   - `tests/vm/vmtest.sh` rewritten (T1–T10: counter-based block check, coexistence, migration, guard, reboot-independent); new `tests/vm/vm.sh` (up/push/ssh/down/reset). Reboot test done manually: daemon re-applies the lock with a new token.
+## What was done (short)
+- v0.17.3: DNS lock lives in `com.apple/foxhole.dnsleak`; `/etc/pf.conf` never edited; PF enabled via `pfctl -E` token and released on disable; helper `/usr/local/libexec/foxhole-pf-dnslock`; `launchctl bootstrap/bootout`.
+- Found and fixed by running real tests in the VM: no `utun+` wildcard in PF (now `utun0-15`); `proxy-toggle.sh` never written on clean Apple Silicon (`/usr/local/bin` missing); Privoxy VPN detection matched "(Disconnected)"; hosts update removed old list before download; installer: OverSight/Mergen URLs 404, brew-vulns tap archived, Gatekeeper `spctl` exit code, firewall step cuts incoming SSH.
+- Test infra: `FOXHOLE_VM_NET=bridged` (real internet in the VM); graceful VM shutdown; `tests/vm/vm.sh`; `tests/ci/offline.sh`; `.github/workflows/lint.yml` (not yet seen running on GitHub); `FOXHOLE_ASSUME_YES=1`.
 
-4. Later the same night (all found by running real tests in the VM, not by reading):
-   - PF on macOS has **no `utun+` wildcard** (a block on `utun+` matched nothing) → anchor passes `utun0-15` explicitly (T12 tunnel test).
-   - `proxy-toggle.sh` was never written on a clean Apple Silicon Mac (`/usr/local/bin` missing; success was still printed) → mkdir + check (T13).
-   - `tart stop` lost the last file ops → stale state between runs; `sync; shutdown -h now` first.
-   - `FOXHOLE_ASSUME_YES=1`, `tests/ci/offline.sh`, `.github/workflows/lint.yml` (not yet seen running on GitHub).
-   - Base installer run end to end in the VM: OverSight URL 404 + wrong installer app name, Mergen URL 404, `brew-vulns` tap archived (built into brew), `spctl --status` exit 1 when disabled, firewall step cuts incoming SSH (now asks to skip when port 22 is listening). T15. Installer version → 0.17.3.
+## Uncommitted / unverified
+- `mac-hardening-netlib.sh`: `create_net_backup` now writes `restore.sh` into the backup dir (old message pointed to a non-existent `rollback.sh`). Syntax and shellcheck OK, not run.
+- `tests/vm/vmtest.sh`: T16 tests that restore. Not run. Run: `FOXHOLE_VM_NET=bridged bash tests/vm/run.sh --reset`.
 
-## Environment (Tart VM)
-- Tart 2.41.1 in `~/.local/tart`, symlink `~/.local/bin/tart`. `TART_HOME="/Volumes/Disc Samsung T7/vm - backups/macos_vm"` (SSD must be plugged in).
-- VMs: `foxhole-test` (work copy), `foxhole-clean` (untouched), `foxhole-brew` (clean + Homebrew/CLT; clone it for installer runs: `tart clone foxhole-brew foxhole-test`). NB `run.sh --reset` clones `foxhole-clean`, so brew-dependent tests need the manual clone. Login `admin`/`admin`, `sudo -n` works. Host shell is zsh (no word-splitting; use functions, not `$V`), host `bash` on PATH is Intel-only → use `bash` via `arch -arm64` (scripts re-exec).
-- `bash tests/vm/run.sh --reset` = full test; `bash tests/vm/vm.sh up|push|ssh '…'|down|reset` = ad hoc.
-- Default NAT mode has no internet (host Mullvad Lockdown). **Use `FOXHOLE_VM_NET=bridged bash tests/vm/run.sh [--reset]`** (`--net-bridged=en0`, VM gets a LAN IP, `tart ip --resolver arp`). Stop the VM gracefully (`vm.sh down` / `run.sh` do `sync; shutdown -h now`) — `tart stop` alone lost the last file ops.
+## Environment
+- Tart VMs: `foxhole-test` (work), `foxhole-clean` (base), `foxhole-brew` (clean + Homebrew + CLT). `run.sh --reset` clones `foxhole-clean`, so brew-dependent work needs `tart clone foxhole-brew foxhole-test` first.
+- SSD `Disc Samsung T7` must be mounted. Shut the VM down gracefully (`vm.sh down` / `run.sh` do `sync; shutdown -h now`).
+- Known flake: the SSH control-master/firewall experiment hung; the installer's BlockBlock cask needs a GUI and hangs headless.
 
 ## Open questions for the user
-- Quad9 whitelist passes any port (plain DNS to 9.9.9.9 :53 leaks outside the VPN) → restrict to 443?
-- Block rules cover only interfaces present at enable time (USB NIC added later is unblocked) → change?
-- Old (≤0.17.2) installs: PF stays on after migration (no token); script prints `sudo pfctl -d`.
+- Quad9 whitelist passes any port (plain DNS to 9.9.9.9:53 outside the VPN). Restrict to 443?
+- Block rules cover only interfaces present at enable time. Change?
+- Old installs (≤0.17.2) keep PF on after migration (no token). Script says `sudo pfctl -d`.
+- Leave `debug_netlib/`, or delete before merge?
 
-## Next (see PLAN.md)
-1. Check the GitHub Actions run of `lint.yml` on `debug` (fix if the macOS runner differs).
-2. Base installer + real Privoxy/WireGuard in the VM need brew → Xcode CLT (big download) — optional.
-3. Real DoH profile image `foxhole-doh` (GUI approval; optional — T11 uses a Quad9 plain-DNS stand-in).
-4. Decide `debug_netlib/` and the CLAUDE.md testing section (user's uncommitted CLAUDE.md/AGENTS.md — ask first).
-5. Step 3: `FOXHOLE_ASSUME_YES`, CI, `BASE_SUM` lint, decide `debug_netlib/`, CLAUDE.md testing section → `tests/vm/run.sh`, refresh GitNexus (`node .gitnexus/run.cjs analyze --index-only`).
+## Next (in order)
+1. Push: `arch -arm64 /usr/bin/git push -u origin debug`.
+2. Run T16 in the VM (`FOXHOLE_VM_NET=bridged bash tests/vm/run.sh --reset`); commit if green.
+3. Ask the user whether to open the PR (text above).
+4. Check the `lint.yml` run on GitHub once the PR or branch is visible.
