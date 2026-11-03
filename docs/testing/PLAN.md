@@ -55,7 +55,9 @@ Don't touch the user's uncommitted `CLAUDE.md` / `AGENTS.md`.
 - [x] Tunnel test **without WireGuard** (T12): IPv4 on system `utun3` + a TEST-NET-3 host route through it → DNS passes the `utun3` rule, `vpn_active` sees the VPN. Found: PF has no `utun+` wildcard → explicit `utun0-15`. A real WireGuard run needs brew (→ Xcode CLT) in the VM; deferred.
 - [x] T13 real `proxy-toggle.sh` + LaunchDaemon + networksetup with a stand-in listener (found: `/usr/local/bin` missing on clean Apple Silicon → script never written)
 - [x] T14 `FOXHOLE_ASSUME_YES`
-- [ ] Base installer in the VM (needs brew → Xcode CLT; large download) and real Privoxy binary
+- [x] Base installer run end to end in the VM (`foxhole-brew` image = clean + Homebrew + CLT): 6 findings fixed (see `docs/v 0.17/netlib_v0.17.3.md`, "Installer run"), T15 tests
+- [ ] Real Privoxy binary / WireGuard in the VM (brew is in `foxhole-brew`; `foxhole-test` is cloned from it for installer runs — `run.sh --reset` still clones `foxhole-clean`)
+- [ ] BlockBlock cask installer needs a GUI session (hangs headless) — maybe add a timeout around cask installs
 
 ## Step 3 — P3 quality / merge prep
 - [x] `FOXHOLE_ASSUME_YES=1` for `ask` (netlib + installer; T14, `tests/ci/offline.sh`)

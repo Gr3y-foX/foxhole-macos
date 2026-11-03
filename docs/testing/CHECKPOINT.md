@@ -4,7 +4,7 @@
 - Branch `debug` (v0.17.3) — see `git log` for the head; everything below is committed and pushed unless noted. `main` is still v0.16.1. **Work only on `debug`.** No PR exists (checked via GitHub API); create one only when the user asks.
 - Uncommitted on purpose: `CLAUDE.md`, `AGENTS.md` (the user's own edits — don't touch). Untracked: `.DS_Store`, `.claude/`, `free-claude-code/`, three partial logs `vm-test-…_1706*/1708*/1709*.log` (runs cut off by SSH drops).
 - Work plan with checkboxes: `docs/testing/PLAN.md`. Changelogs: `docs/v 0.17/netlib_v0.17.2-changes.md` (second pass), `docs/v 0.17/netlib_v0.17.3.md`.
-- Last VM runs: **84 pass / 0 fail / 0 skip** ×3 with `FOXHOLE_VM_NET=bridged` (`vm-test-2026-11-03_184035.log`, `_184255.log`). Without bridged mode the VM has no egress and 4 internet checks skip (49/0/4).
+- Last VM run: **93 pass / 0 fail / 0 skip** with `FOXHOLE_VM_NET=bridged` (`vm-test-2026-11-03_193350.log`; 84/0/0 ×3 before the installer tests). Without bridged mode the VM has no egress and 4 internet checks skip (49/0/4).
 
 ## What was done this session
 1. Housekeeping: confirmed B1 (`port = 53`) and the Rosetta guard were already committed (`77c92e6`); tested the guard with a throwaway script; moved the guard above the "Do not run as root" comment in the installer.
@@ -27,10 +27,11 @@
    - `proxy-toggle.sh` was never written on a clean Apple Silicon Mac (`/usr/local/bin` missing; success was still printed) → mkdir + check (T13).
    - `tart stop` lost the last file ops → stale state between runs; `sync; shutdown -h now` first.
    - `FOXHOLE_ASSUME_YES=1`, `tests/ci/offline.sh`, `.github/workflows/lint.yml` (not yet seen running on GitHub).
+   - Base installer run end to end in the VM: OverSight URL 404 + wrong installer app name, Mergen URL 404, `brew-vulns` tap archived (built into brew), `spctl --status` exit 1 when disabled, firewall step cuts incoming SSH (now asks to skip when port 22 is listening). T15. Installer version → 0.17.3.
 
 ## Environment (Tart VM)
 - Tart 2.41.1 in `~/.local/tart`, symlink `~/.local/bin/tart`. `TART_HOME="/Volumes/Disc Samsung T7/vm - backups/macos_vm"` (SSD must be plugged in).
-- VMs: `foxhole-test` (work copy), `foxhole-clean` (untouched). Login `admin`/`admin`, `sudo -n` works. Host shell is zsh (no word-splitting; use functions, not `$V`), host `bash` on PATH is Intel-only → use `bash` via `arch -arm64` (scripts re-exec).
+- VMs: `foxhole-test` (work copy), `foxhole-clean` (untouched), `foxhole-brew` (clean + Homebrew/CLT; clone it for installer runs: `tart clone foxhole-brew foxhole-test`). NB `run.sh --reset` clones `foxhole-clean`, so brew-dependent tests need the manual clone. Login `admin`/`admin`, `sudo -n` works. Host shell is zsh (no word-splitting; use functions, not `$V`), host `bash` on PATH is Intel-only → use `bash` via `arch -arm64` (scripts re-exec).
 - `bash tests/vm/run.sh --reset` = full test; `bash tests/vm/vm.sh up|push|ssh '…'|down|reset` = ad hoc.
 - Default NAT mode has no internet (host Mullvad Lockdown). **Use `FOXHOLE_VM_NET=bridged bash tests/vm/run.sh [--reset]`** (`--net-bridged=en0`, VM gets a LAN IP, `tart ip --resolver arp`). Stop the VM gracefully (`vm.sh down` / `run.sh` do `sync; shutdown -h now`) — `tart stop` alone lost the last file ops.
 
