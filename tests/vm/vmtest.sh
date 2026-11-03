@@ -1,7 +1,8 @@
 #!/bin/bash
+# shellcheck disable=SC2034  # variables are used inside the single-quoted chk "..." strings (eval)
 # Runs INSIDE the foxhole-test VM. Sources the netlib and exercises PF lock paths.
 set -uo pipefail
-cd ~/foxhole
+cd ~/foxhole || exit 1
 PASS=0; FAIL=0
 ok()   { echo "  PASS: $1"; PASS=$((PASS+1)); }
 bad()  { echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
@@ -177,16 +178,23 @@ sudo ifconfig utun3 inet 10.99.0.1 delete >/dev/null 2>&1
 chk "no VPN detected after the tunnel is gone" '! vpn_active_probe'
 disable_pf_dns_lock >/dev/null 2>&1
 
+echo "== T14 ask() with FOXHOLE_ASSUME_YES (real netlib ask, no tty)"
+chk "ask answers y without a tty when FOXHOLE_ASSUME_YES=1" '[[ "$(bash -c "source ./mac-hardening-netlib.sh; FOXHOLE_ASSUME_YES=1 ask q ANS </dev/null >/dev/null; echo \$ANS")" == y ]]'
+chk "ask still answers N without a tty by default" '[[ "$(bash -c "source ./mac-hardening-netlib.sh; ask q ANS </dev/null >/dev/null 2>&1; echo \$ANS")" == N ]]'
+chk "ask rejects command substitution in the variable name use (printf -v, no eval)" '[[ "$(FOXHOLE_ASSUME_YES=1 bash -c "source ./mac-hardening-netlib.sh; ask q ANS </dev/null >/dev/null; echo \$ANS")" == y ]]'
+
 echo "== T13 Privoxy auto-switch: real proxy-toggle.sh + LaunchDaemon + networksetup (stand-in listener on :8118)"
 SVC=$(networksetup -listallnetworkservices | tail -n +2 | grep -v '^\*' | head -1)
 wproxy() { networksetup -getwebproxy "$SVC" | awk -F': ' '$1=="Enabled"{print $2}'; }
 sproxy() { networksetup -getsecurewebproxy "$SVC" | awk -F': ' '$1=="Enabled"{print $2}'; }
 toggle() { sudo bash /usr/local/bin/proxy-toggle.sh; }
-perl -MIO::Socket::INET -e '$s=IO::Socket::INET->new(LocalAddr=>"127.0.0.1",LocalPort=>8118,Listen=>5,ReuseAddr=>1) or die; sleep 900' >/dev/null 2>&1 &
+fake_privoxy() { perl -MIO::Socket::INET -e '$s=IO::Socket::INET->new(LocalAddr=>"127.0.0.1",LocalPort=>8118,Listen=>5,ReuseAddr=>1) or die; alarm 900; while ($c=$s->accept) { close $c }' >/dev/null 2>&1 & }
+fake_privoxy
 LPID=$!; sleep 1
 enable_privoxy_vpn_autoswitch 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | grep -E "✗|\[!\]|loopback|exposed|not listening|loaded"
 chk "toggle script root:wheel 755" '[[ "$(stat -f "%Su:%Sg %Lp" /usr/local/bin/proxy-toggle.sh)" == "root:wheel 755" ]]'
 chk "daemon bootstrapped" 'sudo launchctl print system/com.hardening.proxytoggle >/dev/null 2>&1'
+sleep 8   # the daemon re-runs once after its own proxy changes (WatchPath, ThrottleInterval 5)
 chk "no VPN + Privoxy listening -> web and secure web proxy ON" '[[ "$(wproxy)" == Yes && "$(sproxy)" == Yes ]]'
 chk "proxy points at 127.0.0.1:8118" 'networksetup -getwebproxy "$SVC" | grep -q "Server: 127.0.0.1" && networksetup -getwebproxy "$SVC" | grep -q "Port: 8118"'
 W1=$(wc -l < /var/log/proxy-toggle.log); toggle; toggle
@@ -198,7 +206,7 @@ chk "VPN gone -> proxy back ON" '[[ "$(wproxy)" == Yes ]]'
 kill $LPID 2>/dev/null; wait $LPID 2>/dev/null; toggle
 chk "Privoxy not listening -> proxy OFF (never point at a dead port)" '[[ "$(wproxy)" == No && "$(sproxy)" == No ]]'
 chk "toggle logged the dead-Privoxy case" 'grep -q "Privoxy is not listening" /var/log/proxy-toggle.log'
-perl -MIO::Socket::INET -e '$s=IO::Socket::INET->new(LocalAddr=>"127.0.0.1",LocalPort=>8118,Listen=>5,ReuseAddr=>1) or die; sleep 900' >/dev/null 2>&1 &
+fake_privoxy
 LPID=$!; sleep 1; toggle
 chk "Privoxy back -> proxy ON again" '[[ "$(wproxy)" == Yes ]]'
 disable_privoxy_autoswitch >/dev/null 2>&1

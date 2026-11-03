@@ -1,10 +1,10 @@
 # Checkpoint — 2026-11-03 night (resume here)
 
 ## State
-- Branch `debug` pushed at `841c492` (v0.17.3). `main` is still v0.16.1. **Work only on `debug`.** No PR exists (checked via GitHub API); create one only when the user asks.
+- Branch `debug` (v0.17.3) — see `git log` for the head; everything below is committed and pushed unless noted. `main` is still v0.16.1. **Work only on `debug`.** No PR exists (checked via GitHub API); create one only when the user asks.
 - Uncommitted on purpose: `CLAUDE.md`, `AGENTS.md` (the user's own edits — don't touch). Untracked: `.DS_Store`, `.claude/`, `free-claude-code/`, three partial logs `vm-test-…_1706*/1708*/1709*.log` (runs cut off by SSH drops).
 - Work plan with checkboxes: `docs/testing/PLAN.md`. Changelogs: `docs/v 0.17/netlib_v0.17.2-changes.md` (second pass), `docs/v 0.17/netlib_v0.17.3.md`.
-- Last VM runs: **64 pass / 0 fail / 0 skip** with `FOXHOLE_VM_NET=bridged` (`vm-test-2026-11-03_181300.log`, `_181523.log`). Without bridged mode the VM has no egress and 4 internet checks skip (49/0/4).
+- Last VM runs: **84 pass / 0 fail / 0 skip** ×3 with `FOXHOLE_VM_NET=bridged` (`vm-test-2026-11-03_184035.log`, `_184255.log`). Without bridged mode the VM has no egress and 4 internet checks skip (49/0/4).
 
 ## What was done this session
 1. Housekeeping: confirmed B1 (`port = 53`) and the Rosetta guard were already committed (`77c92e6`); tested the guard with a throwaway script; moved the guard above the "Do not run as root" comment in the installer.
@@ -22,6 +22,12 @@
    - Enable refuses if the main ruleset has no `anchor "com.apple/*"`; `_pf_legacy_cleanup` migrates old pf.conf-marker installs.
    - `tests/vm/vmtest.sh` rewritten (T1–T10: counter-based block check, coexistence, migration, guard, reboot-independent); new `tests/vm/vm.sh` (up/push/ssh/down/reset). Reboot test done manually: daemon re-applies the lock with a new token.
 
+4. Later the same night (all found by running real tests in the VM, not by reading):
+   - PF on macOS has **no `utun+` wildcard** (a block on `utun+` matched nothing) → anchor passes `utun0-15` explicitly (T12 tunnel test).
+   - `proxy-toggle.sh` was never written on a clean Apple Silicon Mac (`/usr/local/bin` missing; success was still printed) → mkdir + check (T13).
+   - `tart stop` lost the last file ops → stale state between runs; `sync; shutdown -h now` first.
+   - `FOXHOLE_ASSUME_YES=1`, `tests/ci/offline.sh`, `.github/workflows/lint.yml` (not yet seen running on GitHub).
+
 ## Environment (Tart VM)
 - Tart 2.41.1 in `~/.local/tart`, symlink `~/.local/bin/tart`. `TART_HOME="/Volumes/Disc Samsung T7/vm - backups/macos_vm"` (SSD must be plugged in).
 - VMs: `foxhole-test` (work copy), `foxhole-clean` (untouched). Login `admin`/`admin`, `sudo -n` works. Host shell is zsh (no word-splitting; use functions, not `$V`), host `bash` on PATH is Intel-only → use `bash` via `arch -arm64` (scripts re-exec).
@@ -34,7 +40,8 @@
 - Old (≤0.17.2) installs: PF stays on after migration (no token); script prints `sudo pfctl -d`.
 
 ## Next (see PLAN.md)
-1. WireGuard tunnel test in the VM (`brew install wireguard-tools wireguard-go`, loopback-style config) → DNS through `utun+` with lock on; real `vpn_active` check.
-2. Privoxy auto-switch with real Privoxy in the VM (brew), installer areas in `vmtest.sh`.
+1. Check the GitHub Actions run of `lint.yml` on `debug` (fix if the macOS runner differs).
+2. Base installer + real Privoxy/WireGuard in the VM need brew → Xcode CLT (big download) — optional.
 3. Real DoH profile image `foxhole-doh` (GUI approval; optional — T11 uses a Quad9 plain-DNS stand-in).
+4. Decide `debug_netlib/` and the CLAUDE.md testing section (user's uncommitted CLAUDE.md/AGENTS.md — ask first).
 5. Step 3: `FOXHOLE_ASSUME_YES`, CI, `BASE_SUM` lint, decide `debug_netlib/`, CLAUDE.md testing section → `tests/vm/run.sh`, refresh GitNexus (`node .gitnexus/run.cjs analyze --index-only`).

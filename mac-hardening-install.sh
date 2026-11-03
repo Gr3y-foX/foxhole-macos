@@ -56,6 +56,12 @@ die() { err "$1"; exit 1; }
 
 ask() {
     local PROMPT="$1" VAR="$2"
+    # Opt-in automation (tests, unattended runs): FOXHOLE_ASSUME_YES=1 answers every prompt "y"
+    if [[ "${FOXHOLE_ASSUME_YES:-0}" == "1" ]]; then
+        info "FOXHOLE_ASSUME_YES=1 — answering yes: $PROMPT"
+        printf -v "$VAR" '%s' 'y'
+        return 0
+    fi
     if [[ -t 0 ]]; then
         # shellcheck disable=SC2229  # reads into the variable *named* by $VAR
         read -rp "    ${PROMPT} (y/N): " "$VAR"

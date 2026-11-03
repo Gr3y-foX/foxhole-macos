@@ -52,13 +52,15 @@ Don't touch the user's uncommitted `CLAUDE.md` / `AGENTS.md`.
 - [x] T11 full stack: Quad9 plain-DNS resolver (stand-in for the DoH profile, which needs GUI approval) + hosts blocklist (77k entries) + lock → health check **10/10**; hosts update/idempotence/reset.
 - [x] `run.sh`/`vm.sh down`: graceful shutdown (`sync; shutdown -h now`) — abrupt `tart stop` lost the last file ops and left stale lock state for the next run. Two consecutive runs: 64/0/0 each.
 - [ ] Real DoH profile image `foxhole-doh` (needs GUI click in the VM: boot with graphics) — still only the plain-DNS stand-in
-- [ ] WireGuard tunnel in the VM (utun with IPv4, proves DNS passes through `utun+` with the lock on; also exercises proxy-toggle `vpn_active` for real)
-- [ ] `vmtest.sh`: Privoxy auto-switch with real Privoxy (brew), base installer dry areas
+- [x] Tunnel test **without WireGuard** (T12): IPv4 on system `utun3` + a TEST-NET-3 host route through it → DNS passes the `utun3` rule, `vpn_active` sees the VPN. Found: PF has no `utun+` wildcard → explicit `utun0-15`. A real WireGuard run needs brew (→ Xcode CLT) in the VM; deferred.
+- [x] T13 real `proxy-toggle.sh` + LaunchDaemon + networksetup with a stand-in listener (found: `/usr/local/bin` missing on clean Apple Silicon → script never written)
+- [x] T14 `FOXHOLE_ASSUME_YES`
+- [ ] Base installer in the VM (needs brew → Xcode CLT; large download) and real Privoxy binary
 
 ## Step 3 — P3 quality / merge prep
-- [ ] `FOXHOLE_ASSUME_YES=1` for `ask`
-- [x] Shellcheck warnings in shipped scripts (SC2229, SC2155, SC2034); `BASE_SUM` in tests/vm/vmtest.sh still open
-- [ ] CI: GitHub Actions macOS runner with `bash -n` + shellcheck + offline anchor tests
+- [x] `FOXHOLE_ASSUME_YES=1` for `ask` (netlib + installer; T14, `tests/ci/offline.sh`)
+- [x] Shellcheck warnings in shipped scripts (SC2229, SC2155, SC2034); `BASE_SUM` removed
+- [x] CI: `.github/workflows/lint.yml` (bash 3.2 syntax, shellcheck, `tests/ci/offline.sh`) — written, not yet seen running on GitHub
 - [ ] Decide on `debug_netlib/`; point CLAUDE.md testing section at `tests/vm/run.sh` (after the user's own edits are in)
 - [ ] Refresh GitNexus index; PR debug→main (only when the user asks)
 
