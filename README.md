@@ -103,11 +103,11 @@ Key building blocks include:
     - Passes loopback, all VPN tunnels (`utun+`) and ICMPv6 (RFC 4890).
     - Whitelists the Quad9 resolvers.
     - Blocks plain DNS and DNS‑over‑TLS (ports 53/853, IPv4 and IPv6) on **physical interfaces only** (`en*`, detected with `networksetup`).
-  - `enable_pf_dns_lock`
-    Appends a marker + `anchor`/`load anchor` lines to `/etc/pf.conf`, reloads PF and installs a LaunchDaemon that reloads the anchor on boot.
+  - `enable_pf_dns_lock` (v0.17.3+)
+    Loads the rules into `com.apple/foxhole.dnsleak`, a child of the `com.apple/*` anchor that the stock `/etc/pf.conf` already evaluates. `/etc/pf.conf` is **not edited** and the main ruleset is **not reloaded**, so other PF users (e.g. a VPN kill switch) keep their rules. PF is enabled with a reference token (`pfctl -E`). A helper (`/usr/local/libexec/foxhole-pf-dnslock start|stop|status`) does the work. A LaunchDaemon runs it again at every boot. Enable refuses to run if the main ruleset does not evaluate `com.apple/*`.
   - `disable_pf_dns_lock`
-    Removes the marker **and** the anchor lines (keeping `/etc/pf.conf` as `root:wheel`), deletes the anchor file and LaunchDaemon, and flushes the anchor rules.
-  - Inspect the active rules with `sudo pfctl -a com.hardening.dnsleak -sr` (plain `pfctl -sr` does not list anchor rules).
+    Flushes the rules and releases the token (`pfctl -X`), so PF goes back to off unless another program still holds a reference. Removes the helper, the rules file and the LaunchDaemon. Installs from v0.17.2 or older, which edited `/etc/pf.conf`, are cleaned up automatically on enable or disable.
+  - Inspect: `sudo pfctl -a com.apple/foxhole.dnsleak -sr` (rules), `sudo pfctl -s References` (who keeps PF on), `/var/log/foxhole-pf.log`.
 
 - **/etc/hosts blocklist**
   - `update_hosts_blocklist`  
@@ -122,12 +122,12 @@ Key building blocks include:
     Adds forwarding rules so private/VPN ranges bypass the proxy.
   - `enable_privoxy_vpn_autoswitch`  
     Creates a `proxy-toggle.sh` script and LaunchDaemon that:
-    - Detects VPN presence via `utun` interfaces.
-    - Turns system HTTP/HTTPS proxy **ON** (`127.0.0.1:8118`) when no VPN is active.
+    - Detects a VPN via `scutil --nc` ("(Connected)") or a `utun` interface with an IPv4 address (Mullvad, ClearVPN, OpenVPN; Tailscale ignored).
+    - Turns system HTTP/HTTPS proxy **ON** (`127.0.0.1:8118`) when no VPN is active and Privoxy is listening.
     - Turns proxy **OFF** when a VPN is active.
     - Implements simple log rotation for `/var/log/proxy-toggle.log`.
   - `disable_privoxy_autoswitch`  
-    Unloads and removes the LaunchDaemon and toggle script.
+    Unloads and removes the LaunchDaemon and toggle script, and turns system web proxies off.
 
 - **Global reset**
   - `reset_net_hardening`  

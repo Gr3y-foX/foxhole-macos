@@ -4,7 +4,7 @@ set -euo pipefail
 # Foxhole-macos — macOS Network Hardening Library
 #
 # File:    mac-hardening-netlib.sh
-# Version: 0.17.2 (2026-11-03)
+# Version: 0.17.3 (2026-11-03)
 # Author:  Gr3y-foX
 # Based on: drduh/macOS-Security-and-Privacy-Guide (MIT)
 # License: GNU GPL v3 — see LICENSE for details
@@ -18,10 +18,18 @@ set -euo pipefail
 # Usage:
 #   Source from profile scripts or run directly for interactive menu.
 #
+# v0.17.3 Highlights:
+#   • PF DNS lock lives in anchor com.apple/foxhole.dnsleak: /etc/pf.conf is
+#     no longer edited and the main ruleset no longer reloaded (VPN-safe)
+#   • PF enabled by reference (pfctl -E / -X): disable restores the old state
+#   • helper /usr/local/libexec/foxhole-pf-dnslock shared by enable/disable/boot
+#   • launchctl bootstrap/bootout instead of load/unload
+#   • old pf.conf marker installs are migrated automatically
+#
 # v0.17.2 Highlights:
 #   • disable_pf_dns_lock removes marker + anchor lines, keeps pf.conf root:wheel
 #   • PF block rules scoped to physical (en*) interfaces again
-#   • enable/verify use "pfctl -a com.hardening.dnsleak -sr" (anchor rules)
+#   • enable/verify read the anchor rules, not plain "pfctl -sr"
 #   • verify_dns_stack no longer aborts under "set -e"; no eval
 #   • proxy-toggle: VPN detection fixed ("(Disconnected)" matched), utun+IPv4
 #     tunnels detected, idempotent writes, never proxies to a dead Privoxy
@@ -86,8 +94,8 @@ create_net_backup() {
     fi
 
     # 2. pf anchor (already exist)
-    [[ -f /etc/pf.anchors/com.hardening.dnsleak ]] \
-        && sudo cp /etc/pf.anchors/com.hardening.dnsleak "${NET_BACKUP_DIR}/pf.anchor.dnsleak" \
+    [[ -f "$PF_LOCK_RULES" ]] \
+        && sudo cp "$PF_LOCK_RULES" "${NET_BACKUP_DIR}/pf.anchor.dnsleak" \
         && log "  [✓] pf anchor"
 
     # 3. /etc/hosts
@@ -172,6 +180,16 @@ resolve_brew_prefix() {
 # ──────────────────────────────────────────
 # PF — DNS LEAK PREVENTION
 # ──────────────────────────────────────────
+# Rules live in a child of Apple's "com.apple/*" anchor, which the stock
+# /etc/pf.conf already evaluates: /etc/pf.conf is never edited and the main
+# ruleset (VPN kill switches live there too) is never reloaded.
+readonly PF_LOCK_ANCHOR="com.apple/foxhole.dnsleak"
+readonly PF_LOCK_RULES="/etc/pf.anchors/com.hardening.dnsleak"
+readonly PF_LOCK_HELPER="/usr/local/libexec/foxhole-pf-dnslock"
+readonly PF_LOCK_TOKEN="/var/db/foxhole/pf.token"
+readonly PF_LOCK_LABEL="com.hardening.pf.dnsleak"
+readonly PF_LOCK_PLIST="/Library/LaunchDaemons/com.hardening.pf.dnsleak.plist"
+
 # Physical (en*) interfaces for PF scoping; falls back to common defaults
 _physical_ifaces() {
     local LIST
@@ -181,7 +199,7 @@ _physical_ifaces() {
 }
 
 prepare_pf_dns_lock_anchor() {
-    local PF_ANCHOR="/etc/pf.anchors/com.hardening.dnsleak"
+    local PF_ANCHOR="$PF_LOCK_RULES"
 
     log "Writing PF anchor for DNS leak prevention: ${PF_ANCHOR}"
     sudo mkdir -p /etc/pf.anchors
@@ -237,10 +255,125 @@ EOF
     log "  [✓] PF anchor written: ${PF_ANCHOR}"
 }
 
-enable_pf_dns_lock() {
+# Helper shared by enable, disable and the boot LaunchDaemon (one code path)
+_install_pf_helper() {
+    sudo mkdir -p "$(dirname "$PF_LOCK_HELPER")"
+    local TMP
+    TMP=$(mktemp /tmp/foxhole-pf-helper.XXXXXX)
+    cat > "$TMP" <<'HELPER'
+#!/bin/bash
+# foxhole-macos PF DNS lock helper — installed by mac-hardening-netlib.sh
+#   start   load the rules into com.apple/foxhole.dnsleak and hold one PF
+#           enable reference (pfctl -E)
+#   stop    flush the rules and release that reference (pfctl -X); PF goes
+#           back off unless something else (e.g. a VPN kill switch) holds one
+#   status  exit 0 if the rules are loaded and the reference is held
+# The stock /etc/pf.conf evaluates anchor "com.apple/*", so neither
+# /etc/pf.conf nor the main ruleset is ever touched.
+ANCHOR="com.apple/foxhole.dnsleak"
+RULES="/etc/pf.anchors/com.hardening.dnsleak"
+TOKEN_FILE="/var/db/foxhole/pf.token"
+
+# pfctl prints ALTQ and "-f" warnings on every call; keep the rest
+pf() {
+    local OUT RC
+    OUT=$(/sbin/pfctl "$@" 2>&1); RC=$?
+    grep -v -e 'ALTQ' -e 'Use of -f option' -e 'present in the main ruleset' \
+            -e 'See /etc/pf.conf' -e '^$' <<< "$OUT" || true
+    return $RC
+}
+
+held_token() {
+    local T
+    [[ -s "$TOKEN_FILE" ]] || return 1
+    T=$(cat "$TOKEN_FILE")
+    [[ "$T" =~ ^[0-9]+$ ]] || return 1
+    pf -s References | grep -qw -- "$T" || return 1
+    echo "$T"
+}
+
+rules_loaded() { pf -a "$ANCHOR" -sr | grep -q "port = 53"; }
+
+case "${1:-}" in
+    start)
+        [[ -f "$RULES" ]] || { echo "rules file missing: $RULES" >&2; exit 1; }
+        pf -a "$ANCHOR" -f "$RULES" >&2 || { echo "failed to load $ANCHOR" >&2; exit 1; }
+        if ! held_token >/dev/null; then
+            OUT=$(pf -E)
+            TOKEN=$(sed -n 's/^Token : //p' <<< "$OUT")
+            [[ -n "$TOKEN" ]] || { echo "pfctl -E returned no token: $OUT" >&2; exit 1; }
+            mkdir -p "$(dirname "$TOKEN_FILE")"
+            ( umask 077; echo "$TOKEN" > "$TOKEN_FILE" )
+        fi
+        echo "$(date '+%F %T') start: rules loaded into $ANCHOR, PF reference held"
+        ;;
+    stop)
+        pf -a "$ANCHOR" -F all >/dev/null || true
+        if T=$(held_token); then
+            pf -X "$T" || true
+        fi
+        rm -f "$TOKEN_FILE"
+        echo "$(date '+%F %T') stop: rules flushed, PF reference released"
+        ;;
+    status)
+        rules_loaded && held_token >/dev/null
+        ;;
+    *)
+        echo "usage: $0 start|stop|status" >&2; exit 2
+        ;;
+esac
+HELPER
+    sudo install -m 755 -o root -g wheel "$TMP" "$PF_LOCK_HELPER" \
+        || { rm -f "$TMP"; die "Failed to install ${PF_LOCK_HELPER}"; }
+    rm -f "$TMP"
+}
+
+_launchd_bootout() {
+    sudo launchctl bootout "system/$1" 2>/dev/null || true
+}
+
+# bootstrap can fail with "5: Input/output error" right after a bootout
+_launchd_bootstrap() {
+    local _
+    for _ in 1 2 3; do
+        sudo launchctl bootstrap system "$1" 2>/dev/null && return 0
+        sleep 1
+    done
+    return 1
+}
+
+# Main ruleset evaluates the com.apple/* children (stock /etc/pf.conf)
+_pf_main_has_apple_anchor() {
+    sudo pfctl -sr 2>/dev/null | grep -qE '^anchor "com\.apple/\*"'
+}
+
+# Pre-0.17.3 installs edited /etc/pf.conf and loaded anchor "com.hardening.dnsleak"
+_pf_legacy_cleanup() {
     local PF_CONF="/etc/pf.conf"
     local PF_MARKER="# ===== hardening dns lock ====="
 
+    if [[ -f "$PF_CONF" ]] && grep -qF "$PF_MARKER" "$PF_CONF"; then
+        info "Removing the DNS lock lines an older version added to ${PF_CONF}..."
+        local TMP_CONF
+        TMP_CONF=$(mktemp)
+        grep -vF -e "$PF_MARKER" \
+                 -e 'anchor "com.hardening.dnsleak"' "$PF_CONF" > "$TMP_CONF" \
+            || { rm -f "$TMP_CONF"; die "Failed to process PF configuration file"; }
+        sudo cp "$PF_CONF" "${PF_CONF}.bak.hardening_$(date +%Y%m%d_%H%M%S)"
+        # install (not mv): mktemp file is user-owned 0600, pf.conf must stay root:wheel
+        sudo install -m 644 -o root -g wheel "$TMP_CONF" "$PF_CONF" \
+            || { rm -f "$TMP_CONF"; die "Failed to install ${PF_CONF}"; }
+        rm -f "$TMP_CONF"
+        # One reload is unavoidable here: it drops the old anchor from the main ruleset
+        sudo pfctl -f "$PF_CONF" 2>/dev/null \
+            || warn "PF reload failed — check: sudo pfctl -nf ${PF_CONF}"
+        log "  [✓] ${PF_CONF} restored (backup saved next to it)"
+        info "Older versions enabled PF with 'pfctl -e'; it stays on. If nothing else uses PF: sudo pfctl -d"
+    fi
+    sudo pfctl -a com.hardening.dnsleak -F all >/dev/null 2>&1 || true
+}
+
+enable_pf_dns_lock() {
     log "Enabling PF DNS leak lock..."
     warn "WARNING: Blocks direct DNS (53/853 v4/v6)."
     warn "Ensure Quad9 DoH profile is already installed."
@@ -250,52 +383,46 @@ enable_pf_dns_lock() {
         return 0
     fi
 
-    if ! grep -qF "$PF_MARKER" "$PF_CONF" 2>/dev/null; then
-        sudo tee -a "$PF_CONF" > /dev/null << EOF
+    [[ -f "$PF_LOCK_RULES" ]] \
+        || die "PF rules missing: ${PF_LOCK_RULES} (run prepare_pf_dns_lock_anchor first)"
 
-${PF_MARKER}
-anchor "com.hardening.dnsleak"
-load anchor "com.hardening.dnsleak" from "/etc/pf.anchors/com.hardening.dnsleak"
-EOF
-        log "PF marker added to ${PF_CONF}"
+    _pf_legacy_cleanup
+
+    # Rules in com.apple/foxhole.dnsleak only apply if the main ruleset evaluates com.apple/*
+    if ! _pf_main_has_apple_anchor; then
+        if [[ -z "$(sudo pfctl -sr 2>/dev/null)" ]] \
+           && grep -qE '^anchor "com\.apple/\*"' /etc/pf.conf 2>/dev/null; then
+            # Nothing loaded yet, so there is nothing to clobber
+            info "PF main ruleset is empty — loading the stock /etc/pf.conf once."
+            sudo pfctl -f /etc/pf.conf 2>/dev/null || die "Failed to load /etc/pf.conf"
+        else
+            err "PF main ruleset does not evaluate anchor \"com.apple/*\" — the lock would never apply."
+            info "A custom /etc/pf.conf or another tool replaced it. Inspect: sudo pfctl -sr"
+            return 1
+        fi
+    fi
+
+    _install_pf_helper
+    _install_pf_launchdaemon    # RunAtLoad: runs "helper start" now and at every boot
+
+    local _
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        sudo /bin/bash "$PF_LOCK_HELPER" status && break
+        sleep 0.5
+    done
+    if sudo /bin/bash "$PF_LOCK_HELPER" status; then
+        log "PF DNS lock: ACTIVE ✓ (anchor ${PF_LOCK_ANCHOR})"
     else
-        warn "PF DNS lock marker already present in ${PF_CONF}"
+        err "PF DNS lock did not come up. Log: /var/log/foxhole-pf.log"
+        sudo tail -n 5 /var/log/foxhole-pf.log 2>/dev/null || true
+        return 1
     fi
-
-    if sudo pfctl -f "$PF_CONF"; then
-        log "PF rules loaded."
-    else
-        warn "PF reload failed — check: sudo pfctl -nf ${PF_CONF}"
-    fi
-
-    # pfctl -e exits non-zero when PF is already enabled; that is fine
-    local PF_ENABLE_OUT
-    PF_ENABLE_OUT=$(sudo pfctl -e 2>&1) || true
-    if [[ "$PF_ENABLE_OUT" == *"already enabled"* ]]; then
-        info "PF was already enabled."
-    elif [[ "$PF_ENABLE_OUT" == *"enabled"* ]]; then
-        log "PF enabled."
-    elif [[ -n "$PF_ENABLE_OUT" ]]; then
-        warn "pfctl -e: ${PF_ENABLE_OUT}"
-    fi
-
-    # Our rules live in the anchor; plain "pfctl -sr" does not list them
-    # pfctl prints loaded rules as "port = 53"
-    if sudo pfctl -a com.hardening.dnsleak -sr 2>/dev/null | grep -q "port = 53"; then
-        log "PF DNS lock: ACTIVE ✓"
-    else
-        warn "PF DNS lock: verify manually: sudo pfctl -a com.hardening.dnsleak -sr"
-    fi
-
-    # [H-5] NEW: LaunchDaemon for auto-starting pf on boot
-    _install_pf_launchdaemon
 }
 
-# [H-5] NEW: auto-start pf anchor on system boot
 _install_pf_launchdaemon() {
-    local PLIST="/Library/LaunchDaemons/com.hardening.pf.dnsleak.plist"
-
-    sudo tee "$PLIST" > /dev/null << 'EOF'
+    local TMP
+    TMP=$(mktemp /tmp/foxhole-pf-plist.XXXXXX)
+    cat > "$TMP" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -305,9 +432,9 @@ _install_pf_launchdaemon() {
     <string>com.hardening.pf.dnsleak</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/sh</string>
-        <string>-c</string>
-        <string>/sbin/pfctl -e -f /etc/pf.conf 2>/dev/null; /sbin/pfctl -a com.hardening.dnsleak -f /etc/pf.anchors/com.hardening.dnsleak</string>
+        <string>/bin/bash</string>
+        <string>/usr/local/libexec/foxhole-pf-dnslock</string>
+        <string>start</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -318,49 +445,35 @@ _install_pf_launchdaemon() {
 </dict>
 </plist>
 EOF
-    sudo chown root:wheel "$PLIST"
-    sudo chmod 644 "$PLIST"
-    sudo launchctl load "$PLIST" 2>/dev/null || true
-    log "  [✓] pf LaunchDaemon installed (auto-loads on boot)"
+    _launchd_bootout "$PF_LOCK_LABEL"
+    sudo install -m 644 -o root -g wheel "$TMP" "$PF_LOCK_PLIST" \
+        || { rm -f "$TMP"; die "Failed to install ${PF_LOCK_PLIST}"; }
+    rm -f "$TMP"
+    _launchd_bootstrap "$PF_LOCK_PLIST" \
+        && log "  [✓] PF LaunchDaemon installed (re-applies the lock at boot)" \
+        || warn "launchctl bootstrap failed for ${PF_LOCK_PLIST}"
 }
 
 disable_pf_dns_lock() {
-    local PF_CONF="/etc/pf.conf"
-    local PF_MARKER="# ===== hardening dns lock ====="
-
     log "Disabling PF DNS leak lock..."
 
-    if [[ -f "$PF_CONF" ]] && grep -qF "$PF_MARKER" "$PF_CONF"; then
-        local TMP_CONF
-        TMP_CONF=$(mktemp)
-        # Drop the marker AND the anchor/load lines enable_pf_dns_lock added
-        grep -vF -e "$PF_MARKER" \
-                 -e 'anchor "com.hardening.dnsleak"' "$PF_CONF" > "$TMP_CONF" \
-            || { rm -f "$TMP_CONF"; die "Failed to process PF configuration file"; }
-        sudo cp "$PF_CONF" "${PF_CONF}.bak.hardening_$(date +%Y%m%d_%H%M%S)"
-        # install (not mv): mktemp file is user-owned 0600, pf.conf must stay root:wheel
-        sudo install -m 644 -o root -g wheel "$TMP_CONF" "$PF_CONF" \
-            || { rm -f "$TMP_CONF"; die "Failed to install ${PF_CONF}"; }
-        rm -f "$TMP_CONF"
-        log "PF marker and anchor lines removed, backup saved."
+    _launchd_bootout "$PF_LOCK_LABEL"
+    sudo rm -f "$PF_LOCK_PLIST"
+
+    # Re-install first so the current stop logic runs even if the helper is missing
+    _install_pf_helper
+    sudo /bin/bash "$PF_LOCK_HELPER" stop >/dev/null \
+        || warn "PF lock helper stop failed"
+    sudo rm -f "$PF_LOCK_HELPER" "$PF_LOCK_RULES" "$PF_LOCK_TOKEN"
+
+    _pf_legacy_cleanup
+
+    if sudo pfctl -s info 2>/dev/null | grep -q "Status: Enabled"; then
+        info "PF stays enabled: another program holds a reference (sudo pfctl -s References)."
     else
-        log "No PF DNS lock marker found — nothing to remove."
+        log "PF is off again (as before the lock)."
     fi
-
-    sudo rm -f /etc/pf.anchors/com.hardening.dnsleak || true
-
-    # Unload LaunchDaemon
-    local PLIST="/Library/LaunchDaemons/com.hardening.pf.dnsleak.plist"
-    sudo launchctl unload "$PLIST" 2>/dev/null || true
-    sudo rm -f "$PLIST"
-
-    if sudo pfctl -f "$PF_CONF" 2>/dev/null; then
-        # Flush leftover rules so they do not linger in the kernel
-        sudo pfctl -a com.hardening.dnsleak -F all 2>/dev/null || true
-        log "PF reloaded without DNS lock."
-    else
-        warn "PF reload failed — check: sudo pfctl -nf ${PF_CONF}"
-    fi
+    log "PF DNS lock removed."
 }
 
 # ──────────────────────────────────────────
@@ -677,8 +790,8 @@ EOF
     sudo chown root:wheel "$DAEMON_PLIST"
     sudo chmod 644 "$DAEMON_PLIST"
 
-    sudo launchctl unload "$DAEMON_PLIST" 2>/dev/null || true
-    sudo launchctl load  "$DAEMON_PLIST" \
+    _launchd_bootout com.hardening.proxytoggle
+    _launchd_bootstrap "$DAEMON_PLIST" \
         && log "LaunchDaemon loaded — proxy auto-switches on VPN." \
         || die "LaunchDaemon failed to load!"
 
@@ -700,7 +813,7 @@ disable_privoxy_autoswitch() {
     local DAEMON_PLIST="/Library/LaunchDaemons/com.hardening.proxytoggle.plist"
     local TOGGLE_SCRIPT="/usr/local/bin/proxy-toggle.sh"
     log "Disabling Privoxy VPN auto-switch..."
-    sudo launchctl unload "$DAEMON_PLIST" 2>/dev/null || true
+    _launchd_bootout com.hardening.proxytoggle
     sudo rm -f "$DAEMON_PLIST" "$TOGGLE_SCRIPT"
     log "  [✓] Privoxy auto-switch disabled"
 
@@ -750,7 +863,7 @@ verify_dns_stack() {
 
     # [2] utun interfaces pass in the PF anchor:
     local PF_UTUN
-    PF_UTUN=$(sudo pfctl -a com.hardening.dnsleak -sr 2>/dev/null | grep "utun" || true)
+    PF_UTUN=$(sudo pfctl -a "$PF_LOCK_ANCHOR" -sr 2>/dev/null | grep "utun" || true)
     if [[ -n "$PF_UTUN" ]]; then
         log "  [2] PF utun+ pass rule present ✓"
         PASS=$((PASS + 1))
@@ -838,7 +951,7 @@ main() {
     echo ""
     echo "  ╔══════════════════════════════════════════╗"
     echo "  ║       macOS Network Hardening Netlib     ║"
-    echo "  ║            v0.17.2 ·  by Gr3y-foX         ║"
+    echo "  ║            v0.17.3 ·  by Gr3y-foX         ║"
     echo "  ║       ARM/M-chip  |  strict mode         ║"
     echo "  ╠══════════════════════════════════════════╣"
     echo "  ║  module: netlib   |  mode: interactive   ║"

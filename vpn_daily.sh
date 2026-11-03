@@ -3,7 +3,7 @@
 # foxhole-macos — VPN Daily Profile
 #
 # File:    vpn_daily.sh
-# Version: 0.17.2 (2026)
+# Version: 0.17.3 (2026)
 # Author:  Gr3y-foX
 # Based on: drduh/macOS-Security-and-Privacy-Guide (MIT)
 # License: GNU GPL v3 — see LICENSE for details
