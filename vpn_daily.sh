@@ -12,7 +12,7 @@
 #   Profile for everyday use with a commercial VPN client
 #   (e.g. ClearVPN, OpenVPN). DNS design (same as the netlib):
 #     macOS DoH profile (Quad9) + PF anchor that blocks plain DNS (53/853)
-#     on physical interfaces while letting VPN tunnels (utun+) pass.
+#     on physical interfaces while letting VPN tunnels (utun0-15) pass.
 #
 # Assumptions:
 #   - mac-hardening-install.sh was already executed.

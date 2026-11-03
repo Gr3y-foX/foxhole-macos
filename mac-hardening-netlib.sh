@@ -11,7 +11,7 @@ set -euo pipefail
 #
 # Overview:
 #   Network hardening primitives for macOS:
-#     - PF DNS leak prevention (utun+ VPN compatible)
+#     - PF DNS leak prevention (VPN tunnels utun0-15 pass)
 #     - /etc/hosts blocklist (StevenBlack)
 #     - Privoxy with VPN-aware auto-proxy switching
 #
@@ -19,6 +19,8 @@ set -euo pipefail
 #   Source from profile scripts or run directly for interactive menu.
 #
 # v0.17.3 Highlights:
+#   • tunnel pass rule lists utun0-utun15: PF on macOS has no "utun+" wildcard
+#     (a block rule on utun+ matched nothing in the VM)
 #   • PF DNS lock lives in anchor com.apple/foxhole.dnsleak: /etc/pf.conf is
 #     no longer edited and the main ruleset no longer reloaded (VPN-safe)
 #   • PF enabled by reference (pfctl -E / -X): disable restores the old state
@@ -31,7 +33,7 @@ set -euo pipefail
 #   • PF block rules scoped to physical (en*) interfaces again
 #   • enable/verify read the anchor rules, not plain "pfctl -sr"
 #   • verify_dns_stack no longer aborts under "set -e"; no eval
-#   • proxy-toggle: VPN detection fixed ("(Disconnected)" matched), utun+IPv4
+#   • proxy-toggle: VPN detection fixed ("(Disconnected)" matched), utun with IPv4
 #     tunnels detected, idempotent writes, never proxies to a dead Privoxy
 #   • update_hosts validates the download before editing /etc/hosts
 #
@@ -206,6 +208,9 @@ prepare_pf_dns_lock_anchor() {
 
     local IFACES
     IFACES=$(_physical_ifaces)
+    local UTUNS=""
+    local N
+    for N in $(seq 0 15); do UTUNS="${UTUNS}${UTUNS:+ }utun${N}"; done
     info "Physical interfaces scoped for DNS block: ${IFACES}"
 
     # Atomic write via tmpfile + install (CR-2 TOCTOU fix)
@@ -228,9 +233,13 @@ prepare_pf_dns_lock_anchor() {
 # [1] Loopback
 pass quick on lo0 all
 
-# [2] VPN tunnels: pass everything on any utun interface (utun+ wildcard)
-pass out quick on utun+ all
-pass in  quick on utun+ all
+EOF
+        # [2] VPN tunnels. PF on macOS does NOT treat "utun+" as a wildcard (verified:
+        # a block rule on utun+ matched nothing), so list the interfaces explicitly.
+        printf '# [2] VPN tunnels: pass everything on utun0-utun15 (no wildcard in PF)\n'
+        printf 'pass out quick on { %s } all\n' "$UTUNS"
+        printf 'pass in  quick on { %s } all\n' "$UTUNS"
+        cat <<'EOF'
 
 # [3] RFC 4890 ICMPv6 obligatory
 pass quick inet6 proto icmp6 all
@@ -865,10 +874,10 @@ verify_dns_stack() {
     local PF_UTUN
     PF_UTUN=$(sudo pfctl -a "$PF_LOCK_ANCHOR" -sr 2>/dev/null | grep "utun" || true)
     if [[ -n "$PF_UTUN" ]]; then
-        log "  [2] PF utun+ pass rule present ✓"
+        log "  [2] PF utun pass rule present ✓"
         PASS=$((PASS + 1))
     else
-        err "  [2] PF utun+ pass rule MISSING"
+        err "  [2] PF utun pass rule MISSING"
         FAIL=$((FAIL + 1))
     fi
 

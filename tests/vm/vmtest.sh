@@ -18,6 +18,10 @@ echo "== T0 static"
 for f in mac-hardening-netlib.sh vpn_daily.sh mac-hardening-install.sh; do chk "bash -n $f" "bash -n $f"; done
 
 A=com.apple/foxhole.dnsleak
+# vpn_active() exactly as written into proxy-toggle.sh
+awk "/<< 'SCRIPT'\$/{f=1;next} /^SCRIPT\$/{f=0} f" ./mac-hardening-netlib.sh | sed -n '/^vpn_active() {/,/^}/p' > /tmp/vpn_active.sh
+source /tmp/vpn_active.sh
+vpn_active_probe() { vpn_active; }
 RULES=/etc/pf.anchors/com.hardening.dnsleak
 HELPER=/usr/local/libexec/foxhole-pf-dnslock
 TOKEN=/var/db/foxhole/pf.token
@@ -50,7 +54,7 @@ enable_pf_dns_lock 2>&1 | sed 's/\x1b\[[0-9;]*m//g'
 chk "pf.conf untouched" 'same_conf && cmp -s /etc/pf.conf /tmp/pf.conf.baseline'
 chk "main ruleset untouched" 'diff <(pfq -sr) /tmp/pf.main.baseline >/dev/null'
 chk "rules loaded in $A (port 53)" 'pfq -a $A -sr | grep -q "port = 53"'
-chk "utun pass rule loaded" 'pfq -a $A -sr | grep -q utun'
+chk "utun pass rules loaded (utun0..utun15)" '[[ "$(pfq -a $A -sr | grep -c "^pass .* on utun")" -ge 30 ]]'
 chk "PF enabled" 'pf_on'
 chk "exactly one PF reference held" '[[ "$(ntokens)" == 1 ]]'
 chk "token file root 600, token is held" '[[ "$(sudo stat -f "%Su %Lp" $TOKEN)" == "root 600" ]] && pfq -s References | grep -qw "$(sudo cat $TOKEN)"'
@@ -152,6 +156,26 @@ else
     chk "reset: /etc/hosts still has localhost" 'grep -q "^127.0.0.1[[:space:]]*localhost" /etc/hosts'
     chk "reset: PF off" '! pf_on'
 fi
+
+echo "== T12 tunnel: utun with IPv4 + route through it, lock on (no internet needed)"
+# A stock VM has only system utuns (IPv6). Give utun3 an IPv4 and route a TEST-NET-3
+# address through it, which is what a VPN client does.
+TUN_IP=203.0.113.53
+prepare_pf_dns_lock_anchor >/dev/null 2>&1; enable_pf_dns_lock >/dev/null 2>&1
+chk "no VPN detected before the tunnel exists" '! vpn_active_probe'
+sudo ifconfig utun3 inet 10.99.0.1 10.99.0.2 netmask 255.255.255.255 up
+sudo route -n add -host $TUN_IP -interface utun3 >/dev/null 2>&1
+chk "route to $TUN_IP goes via utun3" 'route -n get $TUN_IP | grep -q "interface: utun3"'
+pfq -a $A -z >/dev/null
+dig +time=1 +tries=1 +short example.com @$TUN_IP >/dev/null 2>&1
+UT=$(pfq -a $A -vsr | awk '/^pass out quick on utun3 all/ {getline; for (i=1;i<=NF;i++) if ($i=="Packets:") print $(i+1)}')
+echo "  info: packets on the utun3 pass rule: ${UT:-none}"
+chk "DNS through the tunnel passes the utun3 rule" '[[ "${UT:-0}" -gt 0 ]]'
+chk "vpn_active (proxy-toggle) sees the utun IPv4 tunnel" 'vpn_active_probe'
+sudo route -n delete -host $TUN_IP >/dev/null 2>&1
+sudo ifconfig utun3 inet 10.99.0.1 delete >/dev/null 2>&1
+chk "no VPN detected after the tunnel is gone" '! vpn_active_probe'
+disable_pf_dns_lock >/dev/null 2>&1
 
 echo "== T10 vpn_daily.sh menu from another cwd (driven by expect: ask() needs a tty)"
 cat > /tmp/vd.exp <<'EXP'
