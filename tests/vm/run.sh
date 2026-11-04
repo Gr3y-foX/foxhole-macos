@@ -51,7 +51,9 @@ ssh_vm 'rm -rf ~/foxhole && mkdir -p ~/foxhole'
 # Tracked files plus not-yet-committed files under tests/
 (cd "$REPO" && { git ls-files -z; git ls-files -z --others --exclude-standard tests; } \
     | xargs -0 tar -cf -) | ssh_vm 'tar -xf - -C ~/foxhole'
-ssh_vm 'bash ~/foxhole/tests/vm/vmtest.sh' 2>&1 \
-    | tr -d '\r' | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | tee "$LOG"
+# Also keep a copy inside the VM, so the log survives a dropped SSH session
+ssh_vm 'bash ~/foxhole/tests/vm/vmtest.sh > ~/vmtest.log 2>&1; echo "vmtest exit: $?" >> ~/vmtest.log; cat ~/vmtest.log' 2>&1 \
+    | tr -d '\r' | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | tee "$LOG" || true
+echo "ssh exit: ${PIPESTATUS[0]}" | tee -a "$LOG"
 
 echo "Log saved: ${LOG}"
