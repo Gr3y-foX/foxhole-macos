@@ -273,7 +273,8 @@ EOF
     fi
 
     # Our rules live in the anchor; plain "pfctl -sr" does not list them
-    if sudo pfctl -a com.hardening.dnsleak -sr 2>/dev/null | grep -q "port 53"; then
+    # pfctl prints loaded rules as "port = 53"
+    if sudo pfctl -a com.hardening.dnsleak -sr 2>/dev/null | grep -q "port = 53"; then
         log "PF DNS lock: ACTIVE ✓"
     else
         warn "PF DNS lock: verify manually: sudo pfctl -a com.hardening.dnsleak -sr"
@@ -857,5 +858,9 @@ main() {
 }
 
 if [[ "${0##*/}" == "mac-hardening-netlib.sh" ]]; then
+    # Re-exec natively if run from a Rosetta (x86_64) shell
+    if [[ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" == "1" ]]; then
+        exec arch -arm64 /bin/bash "$0" "$@"
+    fi
     main
 fi
