@@ -1,20 +1,41 @@
-# Checkpoint — 2026-11-03 (resume here)
+# Checkpoint — 2026-11-03 night (resume here)
 
 ## State
-- Branch `debug` pushed at `27fc974`. `main` still v0.16.1. PR debug→main: GitHub form was opened, **unknown if submitted** — check `github.com/Gr3y-foX/foxhole-macos/pulls`.
-- Uncommitted on purpose: `CLAUDE.md`, `AGENTS.md` (the user's own edits — don't touch without asking).
-- Last VM run: 31 pass / 0 fail / 4 skip, see `vm-test-report-2026-11-03.md`. The Rosetta guard (commit `77c92e6`) was tested on the host only (re-exec from `/usr/local/bin/bash` → arm64), **not yet re-run in the VM**.
+- Branch `debug` pushed at `841c492` (v0.17.3). `main` is still v0.16.1. **Work only on `debug`.** No PR exists (checked via GitHub API); create one only when the user asks.
+- Uncommitted on purpose: `CLAUDE.md`, `AGENTS.md` (the user's own edits — don't touch). Untracked: `.DS_Store`, `.claude/`, `free-claude-code/`, three partial logs `vm-test-…_1706*/1708*/1709*.log` (runs cut off by SSH drops).
+- Work plan with checkboxes: `docs/testing/PLAN.md`. Changelogs: `docs/v 0.17/netlib_v0.17.2-changes.md` (second pass), `docs/v 0.17/netlib_v0.17.3.md`.
+- Last VM runs: 49 pass / 0 fail / 4 skip (`vm-test-2026-11-03_175310.log`, `_175751.log`). Skips = internet checks (VM has no egress).
 
-## Test VM (Tart 2.41.1, installed manually in `~/.local/tart`, symlink `~/.local/bin/tart`)
-- Storage: `TART_HOME="/Volumes/Disc Samsung T7/vm - backups/macos_vm"` (SSD must be plugged in).
-- VMs: `foxhole-test` (work copy), `foxhole-clean` (untouched backup). Login `admin`/`admin`, passwordless `sudo -n`, but `sudo -v` asks for the password.
-- Run: `bash tests/vm/run.sh --reset` (re-execs natively; host `bash` is Intel-only `/usr/local/bin/bash`).
-- VM has **no direct internet** (host Mullvad Lockdown Mode likely blocks NAT); DNS via the host gateway works.
+## What was done this session
+1. Housekeeping: confirmed B1 (`port = 53`) and the Rosetta guard were already committed (`77c92e6`); tested the guard with a throwaway script; moved the guard above the "Do not run as root" comment in the installer.
+2. Offline bug sweep (`01552ba`), found by reading the code and testing with stubbed `scutil`/`ifconfig`/`nc`/`networksetup`/`curl`:
+   - proxy-toggle `vpn_active` matched "(Disconnected)" → proxy never turned on; now exact "(Connected)" + `utun` with IPv4 (Mullvad/ClearVPN/OpenVPN), Tailscale ignored.
+   - `set_proxy` idempotent (writes touched its own WatchPath); never enables proxy while Privoxy isn't listening; `install_privoxy` now starts it (`brew services`).
+   - Privoxy exposure check used `0.0.0.0.8118` (macOS prints `*.8118`); bypass `forward` rules were CIDR (unsupported) → URL patterns; `disable_privoxy_autoswitch` also turns system proxies off.
+   - `update_hosts` downloads + validates (≥1000 entries) before touching `/etc/hosts`.
+   - Installer: dropped `dnscrypt-proxy` from `SECURITY_FORMULAS`, `ask` uses `printf -v`, script names fixed. shellcheck `-S warning` clean for install/netlib/vpn_daily.
+3. v0.17.3 (`841c492`), plan items 1.2–1.4, researched in the VM first:
+   - Rules load into `com.apple/foxhole.dnsleak` (child of the stock `com.apple/*` anchor) — `/etc/pf.conf` never edited, main ruleset never reloaded (Mullvad-safe).
+   - PF enabled with `pfctl -E` token (`/var/db/foxhole/pf.token`), released with `pfctl -X` on disable → PF returns to its prior state, stays on if another holder exists.
+   - Helper `/usr/local/libexec/foxhole-pf-dnslock start|stop|status` is the single path for enable/disable/boot daemon.
+   - `launchctl bootstrap/bootout system` for PF and Privoxy daemons (`_launchd_bootout`, `_launchd_bootstrap` with retry).
+   - Enable refuses if the main ruleset has no `anchor "com.apple/*"`; `_pf_legacy_cleanup` migrates old pf.conf-marker installs.
+   - `tests/vm/vmtest.sh` rewritten (T1–T10: counter-based block check, coexistence, migration, guard, reboot-independent); new `tests/vm/vm.sh` (up/push/ssh/down/reset). Reboot test done manually: daemon re-applies the lock with a new token.
 
-## Next (from the report's plan)
-1. Re-run `tests/vm/run.sh --reset` to cover the Rosetta guard commit.
-2. P1.2 — load rules into `com.apple/foxhole.dnsleak` instead of editing `/etc/pf.conf` + `pfctl -f` (Mullvad-safe). Prototype + verify in the VM.
-3. P1.3 — `pfctl -E` token / `pfctl -X` so disable restores PF's previous on/off state.
-4. P1.4 — `launchctl bootstrap/bootout system` instead of `load/unload`.
-5. P2 — VM egress (pause Mullvad Lockdown or `--net-softnet`), Quad9 DoH profile image (`foxhole-doh`), WireGuard tunnel test.
-6. Before merge: decide on `debug_netlib/`, update CLAUDE.md testing section → `tests/vm/run.sh`, refresh GitNexus index (`node .gitnexus/run.cjs analyze`).
+## Environment (Tart VM)
+- Tart 2.41.1 in `~/.local/tart`, symlink `~/.local/bin/tart`. `TART_HOME="/Volumes/Disc Samsung T7/vm - backups/macos_vm"` (SSD must be plugged in).
+- VMs: `foxhole-test` (work copy), `foxhole-clean` (untouched). Login `admin`/`admin`, `sudo -n` works. Host shell is zsh (no word-splitting; use functions, not `$V`), host `bash` on PATH is Intel-only → use `bash` via `arch -arm64` (scripts re-exec).
+- `bash tests/vm/run.sh --reset` = full test; `bash tests/vm/vm.sh up|push|ssh '…'|down|reset` = ad hoc.
+- VM has no direct internet (host Mullvad Lockdown likely blocks NAT from `bridge100`); DNS via the host gateway works.
+
+## Open questions for the user
+- Quad9 whitelist passes any port (plain DNS to 9.9.9.9 :53 leaks outside the VPN) → restrict to 443?
+- Block rules cover only interfaces present at enable time (USB NIC added later is unblocked) → change?
+- Old (≤0.17.2) installs: PF stays on after migration (no token); script prints `sudo pfctl -d`.
+
+## Next (see PLAN.md)
+1. Step 2: VM egress (try `tart run --net-softnet`; host Mullvad may need Lockdown paused) → run the 4 skipped checks.
+2. `foxhole-doh` image with the Quad9 DoH profile → health checks [1], [3]–[6]; WireGuard tunnel test.
+3. `vmtest.sh` coverage: hosts blocklist, Privoxy autoswitch with real Privoxy, base installer.
+4. Make `run.sh --reset` wait for the VM to stop (one run after a reboot wrote no log).
+5. Step 3: `FOXHOLE_ASSUME_YES`, CI, `BASE_SUM` lint, decide `debug_netlib/`, CLAUDE.md testing section → `tests/vm/run.sh`, refresh GitNexus (`node .gitnexus/run.cjs analyze --index-only`).
