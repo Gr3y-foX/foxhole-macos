@@ -27,6 +27,11 @@ set -euo pipefail
 #   • helper /usr/local/libexec/foxhole-pf-dnslock shared by enable/disable/boot
 #   • launchctl bootstrap/bootout instead of load/unload
 #   • old pf.conf marker installs are migrated automatically
+#   • DNS policy for the lock (FOXHOLE_DNS_MODE or a menu prompt): doh (default,
+#     Quad9 on tcp 443 only), vpn (no Quad9 exception, DNS only through the
+#     tunnel) or plain (Quad9 on any port, the old behaviour)
+#   • boot helper re-reads the physical interfaces, so a NIC added later is
+#     scoped too (falls back to the rules file as written)
 #
 # v0.17.2 Highlights:
 #   • disable_pf_dns_lock removes marker + anchor lines, keeps pf.conf root:wheel
@@ -241,8 +246,41 @@ _physical_ifaces() {
     printf '%s\n' "${LIST:-en0 en1 en2 bridge0}"
 }
 
+# DNS policy for the lock (FOXHOLE_DNS_MODE, or asked in the menu):
+#   doh    (default) Quad9 reachable only on 443 (DoH profile); plain DNS to Quad9 is blocked
+#   vpn    no Quad9 exception: DNS must go through the VPN tunnel, set the resolver inside the VPN
+#   plain  Quad9 reachable on any port (plain DNS to 9.9.9.9; for users without a DoH profile)
+_choose_dns_mode() {
+    local MODE="${FOXHOLE_DNS_MODE:-}"
+    if [[ -z "$MODE" ]]; then
+        if [[ "${FOXHOLE_ASSUME_YES:-}" == "1" || ! -t 0 ]]; then
+            MODE="doh"
+        else
+            echo "" >&2
+            echo "  DNS policy for the lock:" >&2
+            echo "   [1] doh   — Quad9 over HTTPS only (DoH profile installed, no VPN needed)  [default]" >&2
+            echo "   [2] vpn   — no exception: DNS only through your VPN tunnel (set DNS inside the VPN)" >&2
+            echo "   [3] plain — Quad9 on any port (plain DNS to 9.9.9.9, no DoH profile)" >&2
+            local PICK
+            read -rp "  Choice (1-3, Enter = 1): " PICK
+            case "$PICK" in
+                2) MODE="vpn" ;;
+                3) MODE="plain" ;;
+                *) MODE="doh" ;;
+            esac
+        fi
+    fi
+    case "$MODE" in
+        doh|vpn|plain) printf '%s\n' "$MODE" ;;
+        *) die "Unknown FOXHOLE_DNS_MODE '${MODE}' (use doh, vpn or plain)" ;;
+    esac
+}
+
 prepare_pf_dns_lock_anchor() {
     local PF_ANCHOR="$PF_LOCK_RULES"
+    local DNS_MODE
+    DNS_MODE=$(_choose_dns_mode)
+    info "DNS policy: ${DNS_MODE}"
 
     log "Writing PF anchor for DNS leak prevention: ${PF_ANCHOR}"
     sudo mkdir -p /etc/pf.anchors
@@ -271,6 +309,9 @@ prepare_pf_dns_lock_anchor() {
 # All rules are "quick": the first matching rule wins.
 # ============================================================
 
+EOF
+        printf '# DNS policy: %s\n\n' "$DNS_MODE"
+        cat <<'EOF'
 # [1] Loopback
 pass quick on lo0 all
 
@@ -285,13 +326,27 @@ EOF
 # [3] RFC 4890 ICMPv6 obligatory
 pass quick inet6 proto icmp6 all
 
-# [4] Quad9 whitelist (any interface; evaluated before the blocks below)
 EOF
         local IP
-        for IP in "$QUAD9_PRIMARY" "$QUAD9_SECONDARY" \
-                  "$QUAD9_ECS_PRIMARY" "$QUAD9_ECS_SECONDARY"; do
-            printf 'pass out quick proto { udp tcp } to %s\n' "$IP"
-        done
+        case "$DNS_MODE" in
+            doh)
+                printf '# [4] Quad9 whitelist: DoH only (tcp 443); plain DNS to Quad9 stays blocked\n'
+                for IP in "$QUAD9_PRIMARY" "$QUAD9_SECONDARY" \
+                          "$QUAD9_ECS_PRIMARY" "$QUAD9_ECS_SECONDARY"; do
+                    printf 'pass out quick proto tcp to %s port 443\n' "$IP"
+                done
+                ;;
+            plain)
+                printf '# [4] Quad9 whitelist: any port (plain DNS allowed to Quad9)\n'
+                for IP in "$QUAD9_PRIMARY" "$QUAD9_SECONDARY" \
+                          "$QUAD9_ECS_PRIMARY" "$QUAD9_ECS_SECONDARY"; do
+                    printf 'pass out quick proto { udp tcp } to %s\n' "$IP"
+                done
+                ;;
+            vpn)
+                printf '# [4] No Quad9 exception: DNS leaves only through the VPN tunnel (rule [2])\n'
+                ;;
+        esac
         printf '\n# [5] Block plain DNS (53) and DNS-over-TLS (853) on physical interfaces only\n'
         printf '# Tunnels are already passed by rule [2], so these never reach them\n'
         printf 'block out quick on { %s } proto { udp tcp } to any port 53\n' "$IFACES"
@@ -347,7 +402,26 @@ rules_loaded() { pf -a "$ANCHOR" -sr | grep -q "port = 53"; }
 case "${1:-}" in
     start)
         [[ -f "$RULES" ]] || { echo "rules file missing: $RULES" >&2; exit 1; }
-        pf -a "$ANCHOR" -f "$RULES" >&2 || { echo "failed to load $ANCHOR" >&2; exit 1; }
+        # Re-render the interface list of the block rules, so a NIC added since the
+        # rules were written is covered too. Any failure falls back to $RULES as written.
+        LOAD="$RULES"
+        IFACES=$(/usr/sbin/networksetup -listallhardwareports 2>/dev/null \
+            | awk '/^Device: en[0-9]+$/ {print $2}' | tr '\n' ' ' | sed 's/ $//')
+        if [[ -n "$IFACES" ]]; then
+            FRESH=$(mktemp /var/run/foxhole-pf.XXXXXX) || FRESH=""
+            if [[ -n "$FRESH" ]]; then
+                sed -E "s/^(block out quick on \{)[^}]*(\} )/\1 ${IFACES} \2/" \
+                    "$RULES" > "$FRESH"
+                if /sbin/pfctl -nf "$FRESH" >/dev/null 2>&1; then
+                    LOAD="$FRESH"
+                else
+                    echo "re-rendered rules rejected by pfctl; using $RULES as written" >&2
+                fi
+            fi
+        fi
+        pf -a "$ANCHOR" -f "$LOAD" >&2 \
+            || { rm -f "${FRESH:-}"; echo "failed to load $ANCHOR" >&2; exit 1; }
+        rm -f "${FRESH:-}"
         if ! held_token >/dev/null; then
             OUT=$(pf -E)
             TOKEN=$(sed -n 's/^Token : //p' <<< "$OUT")
@@ -426,7 +500,7 @@ _pf_legacy_cleanup() {
 enable_pf_dns_lock() {
     log "Enabling PF DNS leak lock..."
     warn "WARNING: Blocks direct DNS (53/853 v4/v6)."
-    warn "Ensure Quad9 DoH profile is already installed."
+    warn "Mode doh/plain: install the Quad9 DoH profile first. Mode vpn: set your resolver inside the VPN."
     ask "Continue enabling PF DNS lock?" CONFIRM
     if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
         log "PF DNS lock aborted by user."

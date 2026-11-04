@@ -70,7 +70,9 @@ dig +time=1 +tries=2 example.com @8.8.8.8 >/dev/null 2>&1
 B=$(blk53); echo "  info: udp/53 block-rule packets after dig @8.8.8.8: $B"
 chk "DNS to 8.8.8.8 hits the block rule" '[[ "$B" -gt 0 ]]'
 netchk "plain DNS @8.8.8.8 blocked" '! dig +time=3 +tries=1 +short example.com @8.8.8.8 2>/dev/null | grep -q "[0-9]"'
-netchk "Quad9 @9.9.9.9 allowed" 'dig +time=4 +tries=1 +short example.com @9.9.9.9 2>/dev/null | grep -q "[0-9]"'
+netchk "plain DNS to Quad9 @9.9.9.9:53 blocked in the default doh mode" '! dig +time=3 +tries=1 +short example.com @9.9.9.9 2>/dev/null | grep -q "[0-9]"'
+echo "  info: Quad9 rules as PF prints them:"; pfq -a $A -sr | grep "to 9\.9\.9\.9\|to 149"
+chk "doh mode: Quad9 passes tcp 443 only" 'pfq -a $A -sr | grep "to 9\.9\.9\.9" | grep -q "proto tcp.*port = 443" && ! pfq -a $A -sr | grep "to 9\.9\.9\.9" | grep -qv "port = 443"'
 netchk "HTTPS by IP still works during lock" 'curl -s --max-time 6 -o /dev/null -w "%{http_code}" https://9.9.9.9/ -k | grep -qE "^[0-9]{3}$"'
 
 echo "== T4 idempotence + coexistence"
@@ -143,7 +145,7 @@ else
     chk "hosts: marker exactly once" '[[ "$(grep -cF "# ===== StevenBlack Blocklist =====" /etc/hosts)" == 1 ]]'
     chk "hosts: localhost entries kept" 'grep -q "^127.0.0.1[[:space:]]*localhost" /etc/hosts'
     chk "hosts: a listed ad domain resolves to 0.0.0.0" '[[ "$(dscacheutil -q host -a name doubleclick.net 2>/dev/null | awk "/ip_address/{print \$2; exit}")" == 0.0.0.0 ]]'
-    prepare_pf_dns_lock_anchor >/dev/null 2>&1; enable_pf_dns_lock >/dev/null 2>&1
+    FOXHOLE_DNS_MODE=plain prepare_pf_dns_lock_anchor >/dev/null 2>&1; enable_pf_dns_lock >/dev/null 2>&1
     chk "resolver works through the lock" 'dig +time=4 +tries=1 +short example.com | grep -q "[0-9]"'
     chk "plain DNS to 8.8.8.8 blocked, resolver 9.9.9.9 still fine" '! dig +time=3 +tries=1 +short example.com @8.8.8.8 | grep -q "[0-9]" && dig +time=4 +tries=1 +short example.com @9.9.9.9 | grep -q "[0-9]"'
     OUT=$(verify_dns_stack 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
@@ -274,6 +276,29 @@ chk "restored /etc/hosts is root:wheel 644" '[[ "$(stat -f "%Su:%Sg %Lp" /etc/ho
 chk "pf.conf restored to its state at backup time" 'cmp -s /etc/pf.conf /tmp/pf.conf.t16'
 rm -rf "$HOME/.foxhole"
 
+echo "== T17 DNS modes (doh/vpn/plain) + interface list re-rendered at helper start"
+FOXHOLE_DNS_MODE=vpn prepare_pf_dns_lock_anchor >/dev/null 2>&1; enable_pf_dns_lock >/dev/null 2>&1
+chk "vpn mode: no Quad9 pass rule loaded" '! pfq -a $A -sr | grep -q "9\.9\.9\."'
+chk "vpn mode: block rules and utun passes loaded" 'pfq -a $A -sr | grep -q "port = 53" && pfq -a $A -sr | grep -q "^pass .* on utun"'
+netchk "vpn mode: even Quad9 on 53 is blocked" '! dig +time=3 +tries=1 +short example.com @9.9.9.9 2>/dev/null | grep -q "[0-9]"'
+disable_pf_dns_lock >/dev/null 2>&1
+FOXHOLE_DNS_MODE=plain prepare_pf_dns_lock_anchor >/dev/null 2>&1; enable_pf_dns_lock >/dev/null 2>&1
+chk "plain mode: Quad9 passes udp+tcp on any port" 'pfq -a $A -sr | grep "to 9\.9\.9\.9" | grep -qv "port = 443"'
+netchk "plain mode: Quad9 on 53 allowed" 'dig +time=4 +tries=1 +short example.com @9.9.9.9 2>/dev/null | grep -q "[0-9]"'
+disable_pf_dns_lock >/dev/null 2>&1
+FOXHOLE_DNS_MODE=doh prepare_pf_dns_lock_anchor >/dev/null 2>&1; enable_pf_dns_lock >/dev/null 2>&1
+REAL_IF=$(networksetup -listallhardwareports | awk '/^Device: en[0-9]+$/ {print $2; exit}')
+sudo sed -i '' -E 's/^(block out quick on \{)[^}]*(\} )/\1 en99 \2/' $RULES
+chk "rules file now carries a stale interface list (en99 only)" 'grep -q "^block out quick on { en99 }" $RULES'
+sudo bash $HELPER start >/dev/null 2>&1
+chk "helper start re-renders the interface list (real $REAL_IF scoped, stale en99 gone)" 'pfq -a $A -sr | grep "port = 53" | grep -q "$REAL_IF" && ! pfq -a $A -sr | grep -q en99'
+chk "re-render does not touch the rules file on disk" 'grep -q "^block out quick on { en99 }" $RULES'
+ls -la /var/run/foxhole-pf.* 2>&1 | sed "s/^/  info: /"
+chk "re-render leaves no temp files behind" '! ls /var/run/foxhole-pf.* >/dev/null 2>&1'
+chk "helper status still active" 'sudo bash $HELPER status'
+disable_pf_dns_lock >/dev/null 2>&1
+chk "T17 cleanup: PF off, no leftovers" '! pf_on && ! test -e $RULES'
+
 echo "== T10 vpn_daily.sh menu from another cwd (driven by expect: ask() needs a tty)"
 cat > /tmp/vd.exp <<'EXP'
 set timeout 30
@@ -283,6 +308,7 @@ expect "Continue?*" { send "y\r" }
 expect "Password:" { send "admin\r" }
 expect "Choice (1-6):" { send "4\r" }
 expect "Choice (1-6):" { send "1\r" }
+expect "Choice (1-3, Enter = 1):" { send "1\r" }
 expect "Continue enabling PF DNS lock?*" { send "y\r" }
 expect "Choice (1-6):" { send "2\r" }
 expect "Choice (1-6):" { send "6\r" }

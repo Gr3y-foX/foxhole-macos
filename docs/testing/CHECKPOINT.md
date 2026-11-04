@@ -1,60 +1,43 @@
-# Checkpoint — 2026-11-04 (resume here)
+# Checkpoint — 2026-11-04 night (resume here)
 
-## Done this session (local only, nothing pushed)
-- **Session start:** `debug` at `c3ffa61`, in sync with GitHub. Local VM suite last green: 100/0/0 (`vm-test-2026-11-03_233425.log`, includes T16).
-- **`.gitnexusignore`** added with `free-claude-code/`. GitNexus reads it (checked in its source). Re-index: 7,406 nodes → 319 nodes, so the unrelated clone is out.
-- **`AGENTS.md`** is now a symlink to `CLAUDE.md`. The two files were byte-identical, so no content was lost. Agents that read `AGENTS.md` directly still get the full text.
-- **`CLAUDE.md`** (GitNexus section):
-  - the "warn the user before editing" rule for HIGH/CRITICAL risk is explicit again, and says to report callers, affected processes and risk level;
-  - new note: bash functions usually resolve as `UNKNOWN`, so confirm callers with `grep -rn` over the `*.sh` files and say so.
-- **`NEXT_SESSION.md`:** status section added at the top (T16 green, push works with native git, CI blocked by billing, remote URL still open, D1–D4 still open).
-- **Lint:** `bash -n` on all scripts and `shellcheck -S warning` clean.
+Read first: this file, then `SESSION_PLAN.md` (checkpoint list CP0–CP10), then `NEXT_SESSION.md` for background.
 
-## Not done (needs your answer or GitHub)
-- **CI:** still blocked by GitHub's billing lock on the account. Nothing to fix in the workflow.
-- **Decisions D1–D4** (Quad9 port 443, interfaces added later, old-install PF message, `debug_netlib/`): not decided.
-- **Remote URL:** still `macos-sec-harder-26`; the repo moved to `foxhole-macos`.
-- **GitNexus stats** in `CLAUDE.md` still say 7373 symbols. They were generated with the unrelated clone included. Re-generating them would rewrite your block, so I left it for you to decide.
-- **`.claude/skills` table** in `CLAUDE.md` points at untracked files. Commit the skills or drop the table: your call.
-- **Real Mullvad test**, real Privoxy and WireGuard in the VM, DoH profile image: need you at the Mac or more time.
+## State
+- Branch `debug`, remote `origin` = `git@github-foxhole:Gr3y-foX/foxhole-macos.git` (SSH works; run `ssh`/`git push` outside the sandbox, the sandbox blocks DNS).
+- CP0, CP1, CP3, CP4 and D2 are done. See `git log` for the head; D4 (archive `debug_netlib/`) and CP7-CP9 are open.
+- PR `debug` → `main`: not opened. Open only if the user asks. PR text: title `v0.17.3: PF DNS lock in com.apple/* child anchor, installer fixes, VM test suite`; body from `docs/v 0.17/netlib_v0.17.3.md` + VM result + open items.
+- CI: the user says billing is fixed but the account has no credit (free plan). Re-check `lint` runs once pushed.
 
-## Your uncommitted edits
-- The GitNexus refresh you had in `CLAUDE.md`/`AGENTS.md` is included in this local commit, together with my changes, because the two files are now one. Revert that hunk if you didn't want it committed.
+## User decisions (CP2, answered 2026-11-04)
+- **D1:** make it configurable. DNS modes via `FOXHOLE_DNS_MODE` or a menu prompt: `doh` (default, Quad9 on tcp 443 only), `vpn` (no Quad9 exception, DNS only through the tunnel; the user's own Mullvad setup with Quad9 inside the VPN), `plain` (Quad9 any port, old behaviour).
+- **D2:** yes. Helper `start` re-renders the physical-interface list at boot, falls back to the rules file as written. Test in the VM before shipping; `create_net_backup` (writes `restore.sh`) is the safety net.
+- **D3:** keep the `sudo pfctl -d` message, no auto-disable (my recommendation; user left it to me).
+- **D4:** move `debug_netlib/` to `docs/archive/` (not done yet).
+- **R1:** remote already switched to `foxhole-macos` by the user.
 
-## Branch / PR state
-- Work branch: `debug`. `main` is still v0.16.1. **Never push to main; work only on `debug`.**
-- CI status: all `lint` runs fail before any step starts: GitHub says the account is locked due to a billing issue (owner must fix; check via https://api.github.com/repos/Gr3y-foX/foxhole-macos/actions/runs). Workflow now has a Linux shellcheck job and a separate macOS job.
-- Latest fresh-VM suite: 100 passed / 0 failed / 0 skipped (`vm-test-2026-11-03_233425.log`, includes T16). Remote `debug` was at `f59538b` when this section was written; see `git log` for the current head.
-  - `e6730f3` fix(install): OverSight/Mergen downloads, brew vulns, Gatekeeper, SSH-aware firewall (VM suite 93/0/0)
-  - `548c6e5` docs: plan and checkpoint after the installer run
-  - `f59538b` WIP: `restore.sh` in net backups + T16 test (T16 NOT run in the VM yet)
-- GitHub says the repo moved to `https://github.com/Gr3y-foX/foxhole-macos.git`. Update the remote when convenient; pushes to the old URL still work for now.
-- Push problem: the Intel Homebrew `git` (`/usr/local/bin/git`, Rosetta) hangs on github.com; `curl` works. Apple's native `arch -arm64 /usr/bin/git push -u origin debug` connects. Use that, or retry later.
-- **No PR opened.** Open one only when asked. PR text (ready to paste):
-  - Title: `v0.17.3: PF DNS lock in com.apple/* child anchor, installer fixes, VM test suite`
-  - Body: what changed (see `docs/v 0.17/netlib_v0.17.3.md`); VM suite `tests/vm/run.sh` 93 passed / 0 failed / 0 skipped with `FOXHOLE_VM_NET=bridged`; open items below.
+## Work in the commit "feat(netlib): DNS modes + interface re-render" (CP4 + D2 done)
+- `mac-hardening-netlib.sh`: `_choose_dns_mode`, mode-aware rule [4] in `prepare_pf_dns_lock_anchor`, interface re-render in the helper `start` heredoc.
+- `tests/ci/offline.sh`: tests for the three modes + invalid mode. Offline suite: **16 passed / 0 failed**. `bash -n` + `shellcheck -S warning` clean.
+- `tests/vm/vmtest.sh`: T3 now expects plain DNS to 9.9.9.9 blocked in `doh` mode; T11 uses `FOXHOLE_DNS_MODE=plain` (its resolver is a plain-DNS stand-in); new **T17** (modes + interface re-render with a stale `en99` list), placed before T10.
+- Fresh-VM run: **112 passed / 0 failed / 0 skipped** (`docs/testing/vm-test-2026-11-04_231847.log`). Earlier runs found and fixed test bugs only (PF prints `inet proto tcp ... port = 443`; vpn_daily [1] now shows the mode prompt, T10 answers it).
 
-## What was done (short)
-- v0.17.3: DNS lock lives in `com.apple/foxhole.dnsleak`; `/etc/pf.conf` never edited; PF enabled via `pfctl -E` token and released on disable; helper `/usr/local/libexec/foxhole-pf-dnslock`; `launchctl bootstrap/bootout`.
-- Found and fixed by running real tests in the VM: no `utun+` wildcard in PF (now `utun0-15`); `proxy-toggle.sh` never written on clean Apple Silicon (`/usr/local/bin` missing); Privoxy VPN detection matched "(Disconnected)"; hosts update removed old list before download; installer: OverSight/Mergen URLs 404, brew-vulns tap archived, Gatekeeper `spctl` exit code, firewall step cuts incoming SSH.
-- Test infra: `FOXHOLE_VM_NET=bridged` (real internet in the VM); graceful VM shutdown; `tests/vm/vm.sh`; `tests/ci/offline.sh`; `.github/workflows/lint.yml` (not yet seen running on GitHub); `FOXHOLE_ASSUME_YES=1`.
+## VM result
+- 112/0/0, log `docs/testing/vm-test-2026-11-04_231847.log`. One earlier run had a one-off T17 failure ("temp file left in /var/run/foxhole-pf.*"); not reproduced. If it returns, suspect the boot LaunchDaemon `start` still running right after enable.
 
-## Uncommitted / unverified
-- Nothing in the code is unverified now: `restore.sh` + T16 passed on a fresh VM (100/0/0). Only `CLAUDE.md`/`AGENTS.md` are modified (the user's own edits).
+## Next steps (in order)
+1. (done) D1/D2 committed and pushed.
+2. D4: `git mv debug_netlib docs/archive/debug_netlib`, fix references (`grep -rn debug_netlib`), commit, push.
+3. CP7 docs: README vs code (DNS modes, `FOXHOLE_DNS_MODE`), draft the new CLAUDE.md "Testing" text and **show it to the user before editing**, tick PLAN.md, consolidated test report, drop stale claims.
+4. CP8 GitNexus: `node .gitnexus/run.cjs analyze --index-only`, then `detect-changes --scope compare --base-ref main` (bash = UNKNOWN; confirm callers with `grep -rn`).
+5. CP9: ask whether to open the PR.
+6. Optional (CP10): real Privoxy / WireGuard in the `foxhole-brew` VM; real Mullvad test in the VM.
 
-## Environment
-- Tart VMs: `foxhole-test` (work), `foxhole-clean` (base), `foxhole-brew` (clean + Homebrew + CLT). `run.sh --reset` clones `foxhole-clean`, so brew-dependent work needs `tart clone foxhole-brew foxhole-test` first.
-- SSD `Disc Samsung T7` must be mounted. Shut the VM down gracefully (`vm.sh down` / `run.sh` do `sync; shutdown -h now`).
-- Known flake: the SSH control-master/firewall experiment hung; the installer's BlockBlock cask needs a GUI and hangs headless.
+## Mullvad account (privacy)
+The user gave a Mullvad account number for a VM-only test. It is deliberately **not stored anywhere** (not in files, git, logs or memory). Ask the user again when the test is wanted; pass it to `mullvad account login` over stdin inside the VM only. The VM needs the Mullvad CLI installed first (brew cask), and an account has a device limit.
 
-## Open questions for the user
-- Quad9 whitelist passes any port (plain DNS to 9.9.9.9:53 outside the VPN). Restrict to 443?
-- Block rules cover only interfaces present at enable time. Change?
-- Old installs (≤0.17.2) keep PF on after migration (no token). Script says `sudo pfctl -d`.
-- Leave `debug_netlib/`, or delete before merge?
-
-## Next (in order)
-1. Push: `arch -arm64 /usr/bin/git push -u origin debug`.
-2. Run T16 in the VM (`FOXHOLE_VM_NET=bridged bash tests/vm/run.sh --reset`); commit if green.
-3. Ask the user whether to open the PR (text above).
-4. Check the `lint.yml` run on GitHub once the PR or branch is visible.
+## Environment notes
+- Tart VMs on the SSD `Disc Samsung T7`: `foxhole-test` (work), `foxhole-clean` (base for `--reset`), `foxhole-brew` (clean + Homebrew + CLT).
+- Shut the VM down gracefully (`tests/vm/vm.sh down`, `run.sh` does it).
+- Host rules: no `pfctl`/`launchctl`/`networksetup`/installer runs on the host. Work only on `debug`. No PR unasked.
+- The sandbox blocks DNS and `mktemp` in the system temp dir: run `ssh`, `git push` and `tests/ci/offline.sh` with the sandbox disabled (they don't change the system).
+- Commit footer: the Co-Authored-By line from the session's system reminder. Never commit `.DS_Store`, `.claude/`, `free-claude-code/`.

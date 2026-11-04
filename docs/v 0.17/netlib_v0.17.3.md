@@ -72,3 +72,16 @@ The base installer had never been run end to end. Findings and fixes:
 T15 covers the OverSight pin and archive layout, the Mergen install with checksum, and the Gatekeeper case
 (stubbed `spctl`, because macOS 26 does not let a script switch Gatekeeper off again).
 Suite: 93 passed, 0 failed, 0 skipped.
+
+## DNS modes and interface re-render (2026-11-04)
+
+Decisions D1 and D2 from the review:
+
+| Change | Detail |
+|---|---|
+| DNS policy | `FOXHOLE_DNS_MODE` (or a prompt in menu [1] / `vpn_daily` [1]; non-interactive and `FOXHOLE_ASSUME_YES=1` default to `doh`). `doh`: Quad9 only on tcp 443, plain DNS to 9.9.9.9 is blocked. `vpn`: no Quad9 exception, DNS leaves only through the tunnel (resolver set inside the VPN, e.g. Mullvad with Quad9). `plain`: Quad9 on any port (the old behaviour). An unknown value aborts. |
+| Interface list | The boot helper (`start`) re-reads `networksetup -listallhardwareports` and rewrites the `block ... on { ... }` lines in memory before loading. A NIC added after enabling is scoped at the next boot/start. Invalid result (`pfctl -nf`) or an empty list falls back to the rules file as written; the file on disk is never changed. |
+| Not changed | D3: an old (<=0.17.2) install keeps PF on after migration; the script still prints `sudo pfctl -d`. Without a token we cannot tell whether another tool needs PF. |
+
+Tests: `tests/ci/offline.sh` 16/16 (three modes, invalid mode). VM suite 112 passed, 0 failed, 0 skipped: T3 expects plain DNS to Quad9 blocked in `doh` mode, T11 uses `plain` (its resolver is a plain-DNS stand-in), T10 answers the mode prompt, new T17 covers the modes and a stale `en99` interface list.
+PF prints the port as `443` and the rule as `inet proto tcp`. One earlier run reported a leftover `/var/run/foxhole-pf.*` temp file in T17; it did not repeat (next run clean). If it shows up again, suspect the boot LaunchDaemon's own `start` still running right after enable.

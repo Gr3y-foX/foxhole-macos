@@ -30,8 +30,14 @@ chk "passes utun0..utun15 explicitly (PF has no utun+ wildcard)" \
     '[[ "$(grep -c "^pass .* on { utun0 .*utun15 }" "$T/anchor.rules")" == 2 ]] && ! grep -q "utun+" "$T/anchor.rules"'
 chk "blocks 53 and 853 on physical interfaces only" \
     '[[ "$(grep -c "^block out quick on {" "$T/anchor.rules")" == 4 ]] && ! grep -E "^block" "$T/anchor.rules" | grep -vq " on {"'
-chk "Quad9 whitelist comes before the blocks" \
-    '[[ "$(grep -n "9\.9\.9\.9" "$T/anchor.rules" | head -1 | cut -d: -f1)" -lt "$(grep -n "^block" "$T/anchor.rules" | head -1 | cut -d: -f1)" ]]'
+chk "default mode doh: Quad9 passes tcp 443 only, before the blocks" \
+    '[[ "$(grep -c "^pass out quick proto tcp to .* port 443$" "$T/anchor.rules")" == 4 ]] && ! grep -q "proto { udp tcp } to 9" "$T/anchor.rules" && [[ "$(grep -n "9\.9\.9\.9" "$T/anchor.rules" | head -1 | cut -d: -f1)" -lt "$(grep -n "^block" "$T/anchor.rules" | head -1 | cut -d: -f1)" ]]'
+FOXHOLE_DNS_MODE=plain prepare_pf_dns_lock_anchor >/dev/null 2>&1
+chk "mode plain: Quad9 on any port" '[[ "$(grep -c "^pass out quick proto { udp tcp } to " "$T/anchor.rules")" == 4 ]]'
+FOXHOLE_DNS_MODE=vpn prepare_pf_dns_lock_anchor >/dev/null 2>&1
+chk "mode vpn: no Quad9 exception, blocks remain" '! grep -q "9\.9\.9\." "$T/anchor.rules" && [[ "$(grep -c "^block out quick on {" "$T/anchor.rules")" == 4 ]]'
+chk "unknown mode is rejected" '! (FOXHOLE_DNS_MODE=bogus _choose_dns_mode >/dev/null 2>&1)'
+prepare_pf_dns_lock_anchor >/dev/null 2>&1
 if pfctl -h >/dev/null 2>&1 && [[ "$(uname)" == Darwin ]] && command -v pfctl >/dev/null; then
     if /usr/bin/sudo -n true 2>/dev/null; then
         chk "pfctl -nf accepts the anchor" '/usr/bin/sudo -n pfctl -nf "$T/anchor.rules" 2>/dev/null'
