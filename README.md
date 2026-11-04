@@ -1,4 +1,3 @@
-# new readme
 # 🦊 Foxhole-macos — macOS Security Hardening 2026
 
 Advanced hardening toolkit for macOS (Intel + Apple Silicon), focused on **practical security baselines** and **network‑safe profiles**, inspired by [drduh/macOS-Security-and-Privacy-Guide](https://github.com/drduh/macOS-Security-and-Privacy-Guide).
@@ -85,8 +84,8 @@ This keeps the **first run** as safe and reversible as possible.
 Network functionality is split into two layers:
 
 1. **Network library** — `mac-hardening-netlib.sh`  
-   Low‑level, reusable functions for DNSCrypt, PF, Privoxy, and `/etc/hosts` blocklists.
-2. **Profiles** — e.g. `profile-vpn-daily.sh`  
+   Low‑level, reusable functions for the PF DNS leak lock, Privoxy, and `/etc/hosts` blocklists.
+2. **Profiles** — e.g. `vpn_daily.sh`  
    High‑level scripts that call the netlib with a specific threat model.
 
 This design lets you reuse the same primitives across multiple profiles without duplicating logic.
@@ -95,20 +94,20 @@ This design lets you reuse the same primitives across multiple profiles without 
 
 Key building blocks include:
 
-- **DNSCrypt**
-  - `install_dnscrypt`, `enable_dnscrypt`, `disable_dnscrypt`  
-    Installs and controls `dnscrypt-proxy` as a **user‑level** service (no `sudo brew services`).  
-    Provides encrypted DNS on localhost (e.g. `127.0.0.1:5355`).
+- **DNS stack** (v0.17.1+)
+  DNS is handled by the **macOS DoH configuration profile (Quad9)**. `dnscrypt-proxy` was removed because it conflicts with the profile.
 
 - **PF DNS leak lock**
-  - `prepare_pf_dns_lock_anchor`  
-    Writes PF anchor (`/etc/pf.anchors/com.hardening.dnsleak`) with rules that:
-    - Allow DNS over HTTPS from `127.0.0.1` / `::1` to ports 443/8443.
-    - Block direct DNS (ports 53/853) for IPv4 and IPv6.
-  - `enable_pf_dns_lock`  
-    Appends a marker + anchor load block into `/etc/pf.conf` and reloads PF.
-  - `disable_pf_dns_lock`  
-    Removes the marker and anchor from PF and reloads a clean configuration.
+  - `prepare_pf_dns_lock_anchor`
+    Writes the anchor `/etc/pf.anchors/com.hardening.dnsleak`:
+    - Passes loopback, all VPN tunnels (`utun+`) and ICMPv6 (RFC 4890).
+    - Whitelists the Quad9 resolvers.
+    - Blocks plain DNS and DNS‑over‑TLS (ports 53/853, IPv4 and IPv6) on **physical interfaces only** (`en*`, detected with `networksetup`).
+  - `enable_pf_dns_lock`
+    Appends a marker + `anchor`/`load anchor` lines to `/etc/pf.conf`, reloads PF and installs a LaunchDaemon that reloads the anchor on boot.
+  - `disable_pf_dns_lock`
+    Removes the marker **and** the anchor lines (keeping `/etc/pf.conf` as `root:wheel`), deletes the anchor file and LaunchDaemon, and flushes the anchor rules.
+  - Inspect the active rules with `sudo pfctl -a com.hardening.dnsleak -sr` (plain `pfctl -sr` does not list anchor rules).
 
 - **/etc/hosts blocklist**
   - `update_hosts_blocklist`  
@@ -133,7 +132,7 @@ Key building blocks include:
 - **Global reset**
   - `reset_net_hardening`  
     Convenience helper that attempts to:
-    - Stop `dnscrypt-proxy`.
+    - Remove the hosts blocklist.
     - Disable PF DNS lock.
     - Disable Privoxy auto‑switch.
     - Clear system HTTP/HTTPS proxy settings across all network services.
@@ -146,36 +145,27 @@ You can run `mac-hardening-netlib.sh` directly (it has its own menu), but the co
 
 Profiles define **how** to use the netlib for a specific threat model.
 
-#### VPN Daily — `profile-vpn-daily.sh`
+#### VPN Daily — `vpn_daily.sh`
 
 Threat model: everyday user with a commercial VPN (e.g. ClearVPN, OpenVPN) who wants “**turn on VPN and forget**”.
 
 Design goals:
 
-- No PF kill‑switches by default.
-- No direct editing of `/etc/pf.conf` from this profile.
+- No PF kill‑switches.
+- PF changes are limited to the DNS leak lock anchor and are reversible from the menu.
 - No Privoxy auto‑proxy for non‑technical users.
-- DNS changes are minimal and easily reversible.
+- DNS changes are minimal and easily reversible (Quad9 DoH profile + PF anchor).
 
 Menu actions:
 
-- **[1] Without VPN — enable `dnscrypt-proxy`**
-  - Installs + enables `dnscrypt-proxy` as a user service.
-  - Provides local encrypted DNS when browsing on regular Wi‑Fi.
+- **[1] Enable PF DNS lock** — blocks plain DNS (53/853) on physical interfaces; VPN tunnels are not affected.
+- **[2] Disable PF DNS lock**
+- **[3] DNS stack health check** (`verify_dns_stack`)
+- **[4] Usage & DNS‑leak guidance** (ClearVPN / OpenVPN, ipleak.net, dnsleaktest.com)
+- **[5] Reset** — calls `reset_net_hardening` from the netlib
+- **[6] Exit**
 
-- **[2] With VPN — disable `dnscrypt-proxy`**
-  - Lets the VPN client fully control DNS (recommended for simpler setups).
-  - Avoids conflicts between system DNS and VPN‑pushed resolvers.
-
-- **[3] Usage & DNS‑leak guidance**
-  - Explains how to:
-    - Combine ClearVPN / OpenVPN with this profile.
-    - Test VPN and DNS leaks via online tools (ipleak.net, dnsleaktest.com, etc.).
-
-- **[4] Reset**
-  - Calls `reset_net_hardening` from the netlib to undo DNS/proxy changes.
-
-- **[5] Exit**
+Requires the Quad9 DoH profile to be installed first; otherwise the PF lock breaks DNS.
 
 This profile is intentionally **non‑destructive** and aims to be safe for non‑experts.
 
@@ -223,7 +213,7 @@ After the base install, you can either:
 bash mac-hardening-netlib.sh
 
 ### Everyday VPN profile (ClearVPN/OpenVPN)
-bash profile-vpn-daily.sh
+bash vpn_daily.sh
 
 ### (Future) Paranoid Tor profile
 bash profile-paranoid-tor.sh
