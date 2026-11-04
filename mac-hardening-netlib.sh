@@ -23,6 +23,9 @@ set -euo pipefail
 #   • PF block rules scoped to physical (en*) interfaces again
 #   • enable/verify use "pfctl -a com.hardening.dnsleak -sr" (anchor rules)
 #   • verify_dns_stack no longer aborts under "set -e"; no eval
+#   • proxy-toggle: VPN detection fixed ("(Disconnected)" matched), utun+IPv4
+#     tunnels detected, idempotent writes, never proxies to a dead Privoxy
+#   • update_hosts validates the download before editing /etc/hosts
 #
 # v0.17.1 Highlights:
 #   • Security fixes: shell injection, TOCTOU, XML injection
@@ -33,7 +36,10 @@ set -euo pipefail
 #   • PF anchor now scopes block rules to physical interfaces only
 
 # Constants
+# PRIVOXY_* are for profiles that source the netlib (proxy-toggle.sh hard-codes them)
+# shellcheck disable=SC2034
 readonly PRIVOXY_ADDR="127.0.0.1"
+# shellcheck disable=SC2034
 readonly PRIVOXY_PORT="8118"
 readonly QUAD9_PRIMARY="9.9.9.9"
 readonly QUAD9_SECONDARY="149.112.112.112"
@@ -51,6 +57,7 @@ die()  { err "$1"; exit 1; }
 ask() {
     local PROMPT="$1" VAR="$2"
     if [[ -t 0 ]]; then
+        # shellcheck disable=SC2229  # reads into the variable *named* by $VAR
         read -rp "    ${PROMPT} (y/N): " "$VAR"
     else
         warn "Non-interactive — skipping: $PROMPT"
@@ -363,14 +370,17 @@ update_hosts() {
     local MARKER="# ===== StevenBlack Blocklist ====="
     local HOSTS_URL="https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
     local HOSTS_FILE="/etc/hosts"
-    local BACKUP="/etc/hosts.bak.$(date +%Y%m%d_%H%M%S)"
+    local BACKUP
+    BACKUP="/etc/hosts.bak.$(date +%Y%m%d_%H%M%S)"
     local MIN_LINES=50
+    local HAS_BLOCKLIST=false
     local TMP_HOSTS
-    TMP_HOSTS=$(mktemp)
 
     log "Checking /etc/hosts..."
 
+    # 1. Decide (no changes yet)
     if grep -qF "$MARKER" "$HOSTS_FILE"; then
+        HAS_BLOCKLIST=true
         local BLOCK_LINES
         BLOCK_LINES=$(grep -c "^0\.0\.0\.0" "$HOSTS_FILE" 2>/dev/null || true)
         BLOCK_LINES=${BLOCK_LINES:-0}
@@ -383,15 +393,8 @@ update_hosts() {
             ask "Re-download blocklist?" CONFIRM
         fi
         if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
-            log "Skipping hosts update."; rm -f "$TMP_HOSTS"; return 0
+            log "Skipping hosts update."; return 0
         fi
-        local LINE_NUM
-        LINE_NUM=$(grep -nF "$MARKER" "$HOSTS_FILE" | cut -d: -f1 | head -1)
-        sudo cp "$HOSTS_FILE" "$BACKUP"
-        sudo head -n "$((LINE_NUM - 1))" "$HOSTS_FILE" \
-            | sudo tee "${HOSTS_FILE}.new" > /dev/null
-        sudo mv "${HOSTS_FILE}.new" "$HOSTS_FILE"
-        log "Old blocklist removed. Backup: $BACKUP"
     else
         local TOTAL_LINES
         TOTAL_LINES=$(wc -l < "$HOSTS_FILE" | tr -d ' ')
@@ -401,16 +404,23 @@ update_hosts() {
             grep -v "^#\|^[[:space:]]*$" "$HOSTS_FILE" | head -30 || true
             ask "Add StevenBlack below existing content?" CONFIRM
             if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
-                log "Skipping hosts update."; rm -f "$TMP_HOSTS"; return 0
+                log "Skipping hosts update."; return 0
             fi
         fi
-        sudo cp "$HOSTS_FILE" "$BACKUP"
-        log "Backup: $BACKUP"
     fi
 
+    # 2. Download and validate before touching /etc/hosts, so a failed or
+    #    truncated download never leaves the system without a blocklist
+    TMP_HOSTS=$(mktemp)
     log "Downloading StevenBlack blocklist..."
     if ! curl -fsSL "$HOSTS_URL" -o "$TMP_HOSTS"; then
-        rm -f "$TMP_HOSTS"; die "Failed to download StevenBlack hosts!"
+        rm -f "$TMP_HOSTS"; die "Failed to download StevenBlack hosts! /etc/hosts unchanged."
+    fi
+    local NEW_LINES
+    NEW_LINES=$(grep -c "^0\.0\.0\.0 " "$TMP_HOSTS" || true)
+    if [[ "${NEW_LINES:-0}" -lt 1000 ]]; then
+        rm -f "$TMP_HOSTS"
+        die "Downloaded file has only ${NEW_LINES:-0} block entries — not a hosts blocklist? /etc/hosts unchanged."
     fi
 
     # SHA-256 + [M-4]: inform user about last commit
@@ -423,6 +433,18 @@ update_hosts() {
         2>/dev/null | grep '"sha"' | head -1 | awk -F'"' '{print $4}' | cut -c1-7)
     info "Latest GitHub commit: ${LATEST_COMMIT:-unknown}"
     info "Verify at: https://github.com/StevenBlack/hosts/commits/master/hosts"
+
+    # 3. Apply
+    sudo cp "$HOSTS_FILE" "$BACKUP"
+    log "Backup: $BACKUP"
+    if [[ "$HAS_BLOCKLIST" == true ]]; then
+        local LINE_NUM
+        LINE_NUM=$(grep -nF "$MARKER" "$HOSTS_FILE" | cut -d: -f1 | head -1)
+        sudo head -n "$((LINE_NUM - 1))" "$HOSTS_FILE" \
+            | sudo tee "${HOSTS_FILE}.new" > /dev/null
+        sudo mv "${HOSTS_FILE}.new" "$HOSTS_FILE"
+        log "Old blocklist removed."
+    fi
 
     {
         printf "\n%s\n" "$MARKER"
@@ -444,7 +466,8 @@ update_hosts() {
 disable_hosts_blocklist() {
     local MARKER="# ===== StevenBlack Blocklist ====="
     local HOSTS_FILE="/etc/hosts"
-    local BACKUP="/etc/hosts.bak.remove_$(date +%Y%m%d_%H%M%S)"
+    local BACKUP
+    BACKUP="/etc/hosts.bak.remove_$(date +%Y%m%d_%H%M%S)"
 
     if ! grep -qF "$MARKER" "$HOSTS_FILE" 2>/dev/null; then
         log "No StevenBlack marker in ${HOSTS_FILE} — nothing to remove."
@@ -470,6 +493,12 @@ install_privoxy() {
     if [[ ! -f "$PRIVOXY_CONF" ]]; then
         die "Privoxy config not found: ${PRIVOXY_CONF}. Check brew --prefix."
     fi
+    # Nothing else starts it; without it the proxy toggle would point at a dead port
+    if brew services start privoxy >/dev/null 2>&1; then
+        log "  [✓] Privoxy service started (brew services, runs at login)"
+    else
+        warn "Could not start Privoxy — try: brew services start privoxy"
+    fi
 }
 
 configure_privoxy_vpn_bypass() {
@@ -483,13 +512,22 @@ configure_privoxy_vpn_bypass() {
     fi
 
     log "Adding VPN bypass rules to Privoxy config..."
+    # forward takes URL patterns, not CIDR ("10.0.0.0/8" would match host
+    # 10.0.0.0 with path /8). Host patterns accept * and [] classes.
     sudo tee -a "$PRIVOXY_CONF" > /dev/null << 'EOF'
 # ===== VPN bypass =====
-forward 10.0.0.0/8     .
-forward 172.16.0.0/12  .
-forward 192.168.0.0/16 .
-forward 100.64.0.0/10  .
-forward 127.0.0.0/8    .
+# 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 127.0.0.0/8
+forward 10.*.*.*/                .
+forward 172.1[6-9].*.*/          .
+forward 172.2[0-9].*.*/          .
+forward 172.3[01].*.*/           .
+forward 192.168.*.*/             .
+forward 100.6[4-9].*.*/          .
+forward 100.[7-9][0-9].*.*/      .
+forward 100.1[01][0-9].*.*/      .
+forward 100.12[0-7].*.*/         .
+forward 127.*.*.*/               .
+forward localhost/               .
 EOF
     log "  [✓] VPN bypass rules added"
 }
@@ -521,12 +559,27 @@ log_msg() {
 }
 
 vpn_active() {
-    # H-3: Use scutil --nc list, exclude iCloud/Tailscale
+    # H-3: Network Extension VPNs via scutil, excluding iCloud/Tailscale.
+    # Match "(Connected)" exactly: "(Disconnected)" also contains "Connected".
     scutil --nc list 2>/dev/null \
-        | grep -i "Connected" \
+        | grep -F "(Connected)" \
         | grep -viE "tailscale|icloud|relay" \
         | grep -q "." && return 0
+    # Tunnels that scutil does not list (Mullvad, ClearVPN, OpenVPN):
+    # a utun with an IPv4 address. System utuns (iCloud, Continuity) only
+    # carry IPv6 link-local; Tailscale's 100.64.0.0/10 is skipped.
+    local IF
+    for IF in $(ifconfig -l 2>/dev/null); do
+        [[ "$IF" == utun* ]] || continue
+        ifconfig "$IF" 2>/dev/null | awk '$1 == "inet" {print $2}' \
+            | grep -vqE '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.' \
+            && return 0
+    done
     return 1
+}
+
+privoxy_listening() {
+    /usr/bin/nc -z -G 2 127.0.0.1 8118 >/dev/null 2>&1
 }
 
 get_services() {
@@ -536,29 +589,44 @@ get_services() {
         | grep -vEi "vpn|cisco|anyconnect|wireguard"
 }
 
+# "Yes 127.0.0.1 8118" style summary of one -getwebproxy/-getsecurewebproxy
+proxy_state() {
+    networksetup "$1" "$2" 2>/dev/null \
+        | awk -F': ' '$1=="Enabled"{e=$2} $1=="Server"{s=$2} $1=="Port"{p=$2} END{print e, s, p}'
+}
+
 set_proxy() {
-    local STATE="$1"
+    local STATE="$1" WANT
+    # Only write when something changes: every write touches
+    # /Library/Preferences/SystemConfiguration, which is our own WatchPath
+    if [[ "$STATE" == "on" ]]; then WANT="Yes 127.0.0.1 8118"; else WANT="No"; fi
     while IFS= read -r SERVICE; do
         [[ -z "$SERVICE" ]] && continue
-        local ERR
-        ERR=$(networksetup -setwebproxystate "$SERVICE" "$STATE" 2>&1) \
-            || log_msg "[!] networksetup failed for '${SERVICE}': ${ERR}"
-        ERR=$(networksetup -setsecurewebproxystate "$SERVICE" "$STATE" 2>&1) \
-            || log_msg "[!] networksetup failed for '${SERVICE}': ${ERR}"
-        if [[ "$STATE" == "on" ]]; then
-            ERR=$(networksetup -setwebproxy "$SERVICE" "127.0.0.1" "8118" 2>&1) \
+        local ERR KIND CUR
+        for KIND in web secureweb; do
+            CUR=$(proxy_state "-get${KIND}proxy" "$SERVICE")
+            if [[ "$STATE" == "on" && "$CUR" == "$WANT" ]] \
+               || [[ "$STATE" == "off" && "$CUR" == No* ]]; then
+                continue
+            fi
+            if [[ "$STATE" == "on" ]]; then
+                ERR=$(networksetup "-set${KIND}proxy" "$SERVICE" "127.0.0.1" "8118" 2>&1) \
+                    || log_msg "[!] networksetup failed for '${SERVICE}': ${ERR}"
+            fi
+            ERR=$(networksetup "-set${KIND}proxystate" "$SERVICE" "$STATE" 2>&1) \
                 || log_msg "[!] networksetup failed for '${SERVICE}': ${ERR}"
-            ERR=$(networksetup -setsecurewebproxy "$SERVICE" "127.0.0.1" "8118" 2>&1) \
-                || log_msg "[!] networksetup failed for '${SERVICE}': ${ERR}"
-        fi
+            log_msg "${SERVICE}: ${KIND} proxy ${STATE}"
+        done
     done <<< "$(get_services)"
 }
 
 if vpn_active; then
-    log_msg "VPN detected (scutil) → proxy OFF"
+    set_proxy off
+elif ! privoxy_listening; then
+    # Pointing the system at a dead proxy would cut all web traffic
+    log_msg "[!] No VPN, but Privoxy is not listening on 127.0.0.1:8118 → proxy OFF"
     set_proxy off
 else
-    log_msg "No tunnel VPN → proxy ON"
     set_proxy on
 fi
 SCRIPT
@@ -616,8 +684,13 @@ EOF
 
     sudo bash "$TOGGLE_SCRIPT"
 
-    if netstat -an 2>/dev/null | grep -q "0.0.0.0.8118"; then
-        warn "Privoxy exposed on 0.0.0.0:8118 — check config!"
+    # macOS netstat prints a wildcard listener as "*.8118", not "0.0.0.0.8118"
+    local LISTEN
+    LISTEN=$(netstat -an -p tcp 2>/dev/null | awk '$NF == "LISTEN" && $4 ~ /\.8118$/ {print $4}')
+    if [[ -z "$LISTEN" ]]; then
+        warn "Privoxy is not listening on :8118 — proxy stays OFF until it runs."
+    elif grep -qvE '^(127\.0\.0\.1|::1)\.8118$' <<< "$LISTEN"; then
+        warn "Privoxy exposed beyond loopback (${LISTEN//$'\n'/, }) — check listen-address!"
     else
         log "Privoxy: loopback only ✓"
     fi
@@ -630,6 +703,18 @@ disable_privoxy_autoswitch() {
     sudo launchctl unload "$DAEMON_PLIST" 2>/dev/null || true
     sudo rm -f "$DAEMON_PLIST" "$TOGGLE_SCRIPT"
     log "  [✓] Privoxy auto-switch disabled"
+
+    # The toggle may have left services pointing at 127.0.0.1:8118
+    while IFS= read -r SERVICE; do
+        [[ -z "$SERVICE" ]] && continue
+        local ERR
+        ERR=$(networksetup -setwebproxystate "$SERVICE" off 2>&1) \
+            && log "  [✓] Disabled proxy for ${SERVICE}" \
+            || warn "  [!] Failed to disable proxy for ${SERVICE}: ${ERR}"
+        ERR=$(networksetup -setsecurewebproxystate "$SERVICE" off 2>&1) \
+            && log "  [✓] Disabled secure proxy for ${SERVICE}" \
+            || warn "  [!] Failed to disable secure proxy for ${SERVICE}: ${ERR}"
+    done <<< "$(networksetup -listallnetworkservices | tail -n +2 | grep -v '^\*' || true)"
 }
 
 # ──────────────────────────────────────────
@@ -733,18 +818,8 @@ verify_dns_stack() {
 reset_net_hardening() {
     log "Resetting network hardening (PF DNS lock, Privoxy toggle, hosts blocklist)..."
     disable_pf_dns_lock
-    disable_privoxy_autoswitch
+    disable_privoxy_autoswitch   # also turns system web proxies off
     disable_hosts_blocklist
-    while IFS= read -r SERVICE; do
-        [[ -z "$SERVICE" ]] && continue
-        local ERR
-        ERR=$(networksetup -setwebproxystate "$SERVICE" off 2>&1) \
-            && log "  [✓] Disabled proxy for ${SERVICE}" \
-            || warn "  [!] Failed to disable proxy for ${SERVICE}: ${ERR}"
-        ERR=$(networksetup -setsecurewebproxystate "$SERVICE" off 2>&1) \
-            && log "  [✓] Disabled secure proxy for ${SERVICE}" \
-            || warn "  [!] Failed to disable secure proxy for ${SERVICE}: ${ERR}"
-    done <<< "$(networksetup -listallnetworkservices | tail -n +2 | grep -v '^\*' || true)"
     log "Network hardening reset complete."
 }
 
