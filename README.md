@@ -100,7 +100,7 @@ Key building blocks include:
 - **PF DNS leak lock**
   - `prepare_pf_dns_lock_anchor`
     Writes the anchor `/etc/pf.anchors/com.hardening.dnsleak`:
-    - Passes loopback, all VPN tunnels (`utun+`) and ICMPv6 (RFC 4890).
+    - Passes loopback, all VPN tunnels (`utun0`–`utun15`, listed explicitly: PF on macOS has no `utun+` wildcard) and ICMPv6 (RFC 4890).
     - Whitelists the Quad9 resolvers.
     - Blocks plain DNS and DNS‑over‑TLS (ports 53/853, IPv4 and IPv6) on **physical interfaces only** (`en*`, detected with `networksetup`).
   - `enable_pf_dns_lock` (v0.17.3+)
