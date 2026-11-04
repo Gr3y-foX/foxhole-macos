@@ -403,25 +403,23 @@ case "${1:-}" in
     start)
         [[ -f "$RULES" ]] || { echo "rules file missing: $RULES" >&2; exit 1; }
         # Re-render the interface list of the block rules, so a NIC added since the
-        # rules were written is covered too. Any failure falls back to $RULES as written.
-        LOAD="$RULES"
+        # rules were written is covered too. No temp file: the rules go to pfctl on
+        # stdin. Any failure falls back to $RULES as written.
+        RENDERED=""
         IFACES=$(/usr/sbin/networksetup -listallhardwareports 2>/dev/null \
             | awk '/^Device: en[0-9]+$/ {print $2}' | tr '\n' ' ' | sed 's/ $//')
         if [[ -n "$IFACES" ]]; then
-            FRESH=$(mktemp /var/run/foxhole-pf.XXXXXX) || FRESH=""
-            if [[ -n "$FRESH" ]]; then
-                sed -E "s/^(block out quick on \{)[^}]*(\} )/\1 ${IFACES} \2/" \
-                    "$RULES" > "$FRESH"
-                if /sbin/pfctl -nf "$FRESH" >/dev/null 2>&1; then
-                    LOAD="$FRESH"
-                else
-                    echo "re-rendered rules rejected by pfctl; using $RULES as written" >&2
-                fi
+            RENDERED=$(sed -E "s/^(block out quick on \{)[^}]*(\} )/\1 ${IFACES} \2/" "$RULES")
+            if [[ -z "$RENDERED" ]] || ! /sbin/pfctl -nf - <<< "$RENDERED" >/dev/null 2>&1; then
+                echo "re-rendered rules rejected by pfctl; using $RULES as written" >&2
+                RENDERED=""
             fi
         fi
-        pf -a "$ANCHOR" -f "$LOAD" >&2 \
-            || { rm -f "${FRESH:-}"; echo "failed to load $ANCHOR" >&2; exit 1; }
-        rm -f "${FRESH:-}"
+        if [[ -n "$RENDERED" ]]; then
+            pf -a "$ANCHOR" -f - <<< "$RENDERED" >&2 || { echo "failed to load $ANCHOR" >&2; exit 1; }
+        else
+            pf -a "$ANCHOR" -f "$RULES" >&2 || { echo "failed to load $ANCHOR" >&2; exit 1; }
+        fi
         if ! held_token >/dev/null; then
             OUT=$(pf -E)
             TOKEN=$(sed -n 's/^Token : //p' <<< "$OUT")

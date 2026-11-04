@@ -7,6 +7,7 @@
 #   --reset   recreate foxhole-test from foxhole-clean before running
 #
 # Env:   FOXHOLE_VM_NET=bridged   boot with --net-bridged=en0 (real internet)
+#        FOXHOLE_VM_BASE=foxhole-brew   base image for --reset (default foxhole-clean; -brew has Homebrew)
 #
 # Needs: tart, sshpass, VM image admin/admin (Cirrus Labs vanilla image).
 set -euo pipefail
@@ -20,7 +21,7 @@ fi
 export PATH="$HOME/.local/bin:$PATH"
 export TART_HOME="${TART_HOME:-/Volumes/Disc Samsung T7/vm - backups/macos_vm}"
 VM="foxhole-test"
-CLEAN="foxhole-clean"
+CLEAN="${FOXHOLE_VM_BASE:-foxhole-clean}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LOG_DIR="${REPO}/docs/testing"
 LOG="${LOG_DIR}/vm-test-$(date +%Y-%m-%d_%H%M%S).log"

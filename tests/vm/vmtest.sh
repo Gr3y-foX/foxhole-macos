@@ -299,6 +299,37 @@ chk "helper status still active" 'sudo bash $HELPER status'
 disable_pf_dns_lock >/dev/null 2>&1
 chk "T17 cleanup: PF off, no leftovers" '! pf_on && ! test -e $RULES'
 
+echo "== T18 real Privoxy via Homebrew (base image foxhole-brew: FOXHOLE_VM_BASE=foxhole-brew; needs egress)"
+for B in /opt/homebrew/bin/brew /usr/local/bin/brew; do [[ -x $B ]] && eval "$($B shellenv)" && break; done
+if ! command -v brew >/dev/null 2>&1 || [[ "$NET_OK" != 1 ]]; then
+    echo "  SKIP: T18 real Privoxy (needs Homebrew in the VM and internet; use FOXHOLE_VM_BASE=foxhole-brew)"; SKIP=$((SKIP+1))
+else
+    SVC=$(networksetup -listallnetworkservices | tail -n +2 | grep -v '^\*' | head -1)
+    install_privoxy > /tmp/t18-install.out 2>&1
+    sed 's/\x1b\[[0-9;]*m//g' /tmp/t18-install.out | grep -E "✗|\[!\]|✓" | head -5
+    chk "install_privoxy installed the formula" 'brew list --formula privoxy >/dev/null 2>&1'
+    for _ in $(seq 1 10); do nc -z 127.0.0.1 8118 2>/dev/null && break; sleep 1; done
+    chk "brew services started Privoxy (port 8118 listens)" 'nc -z 127.0.0.1 8118'
+    if ! nc -z 127.0.0.1 8118 2>/dev/null; then
+        echo "  info: brew services did not start Privoxy here (headless ssh has no GUI launchd domain); starting it directly"
+        ( "$(brew --prefix)/sbin/privoxy" --no-daemon "$(brew --prefix)/etc/privoxy/config" >/tmp/privoxy.out 2>&1 & )
+        for _ in $(seq 1 10); do nc -z 127.0.0.1 8118 2>/dev/null && break; sleep 1; done
+    fi
+    chk "Privoxy listens on loopback only (not exposed)" 'lsof -nP -iTCP:8118 -sTCP:LISTEN | grep -q "127.0.0.1:8118" && ! lsof -nP -iTCP:8118 -sTCP:LISTEN | grep -qE "\*:8118|0\.0\.0\.0:8118"'
+    chk "real Privoxy answers HTTP through the proxy" '[[ "$(curl -s -x http://127.0.0.1:8118 --max-time 15 -o /dev/null -w "%{http_code}" http://example.com/)" == 200 ]]'
+    configure_privoxy_vpn_bypass >/tmp/t18-bypass.out 2>&1
+    chk "bypass rules written to the Privoxy config" 'grep -q "foxhole\|VPN bypass\|forward" "$(brew --prefix)/etc/privoxy/config"'
+    enable_privoxy_vpn_autoswitch >/tmp/t18-auto.out 2>&1
+    sleep 8
+    chk "real Privoxy + no VPN -> proxies ON" '[[ "$(networksetup -getwebproxy "$SVC" | awk -F": " "\$1==\"Enabled\"{print \$2}")" == Yes ]]'
+    sudo ifconfig utun3 inet 10.99.0.1 10.99.0.2 netmask 255.255.255.255 up; sudo bash /usr/local/bin/proxy-toggle.sh
+    chk "real Privoxy + VPN up -> proxies OFF" '[[ "$(networksetup -getwebproxy "$SVC" | awk -F": " "\$1==\"Enabled\"{print \$2}")" == No ]]'
+    sudo ifconfig utun3 inet 10.99.0.1 delete
+    disable_privoxy_autoswitch >/dev/null 2>&1
+    chk "disable: proxies OFF and toggle gone" '[[ "$(networksetup -getwebproxy "$SVC" | awk -F": " "\$1==\"Enabled\"{print \$2}")" == No ]] && ! test -e /usr/local/bin/proxy-toggle.sh'
+    pkill -x privoxy 2>/dev/null; brew services stop privoxy >/dev/null 2>&1
+fi
+
 echo "== T10 vpn_daily.sh menu from another cwd (driven by expect: ask() needs a tty)"
 cat > /tmp/vd.exp <<'EXP'
 set timeout 30

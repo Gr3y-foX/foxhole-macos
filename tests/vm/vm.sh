@@ -16,7 +16,7 @@ fi
 export PATH="$HOME/.local/bin:$PATH"
 export TART_HOME="${TART_HOME:-/Volumes/Disc Samsung T7/vm - backups/macos_vm}"
 VM="foxhole-test"
-CLEAN="foxhole-clean"
+CLEAN="${FOXHOLE_VM_BASE:-foxhole-clean}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
           -o PubkeyAuthentication=no -o LogLevel=ERROR -o ServerAliveInterval=10)

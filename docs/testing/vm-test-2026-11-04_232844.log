@@ -19,7 +19,7 @@ root:wheel 644
   PASS: block rules scoped (on {)
 [+] Enabling PF DNS leak lock...
 [!] WARNING: Blocks direct DNS (53/853 v4/v6).
-[!] Ensure Quad9 DoH profile is already installed.
+[!] Mode doh/plain: install the Quad9 DoH profile first. Mode vpn: set your resolver inside the VPN.
 [+]   [✓] PF LaunchDaemon installed (re-applies the lock at boot)
 [+] PF DNS lock: ACTIVE ✓ (anchor com.apple/foxhole.dnsleak)
   PASS: pf.conf untouched
@@ -53,7 +53,7 @@ pass in quick on utun0 all flags S/SA keep state
 pass in quick on utun1 all flags S/SA keep state
 pass in quick on utun2 all flags S/SA keep state
 pass in quick on utun3 all flags S/SA keep state
-  info: udp/53 block-rule packets after dig @8.8.8.8: 10
+  info: udp/53 block-rule packets after dig @8.8.8.8: 8
   PASS: DNS to 8.8.8.8 hits the block rule
   PASS: plain DNS @8.8.8.8 blocked
   PASS: plain DNS to Quad9 @9.9.9.9:53 blocked in the default doh mode
@@ -67,7 +67,7 @@ pass out quick inet proto tcp from any to 149.112.112.11 port = 443 flags S/SA k
   PASS: second enable: still one reference
   PASS: rules survive a main-ruleset reload (pfctl -f /etc/pf.conf)
   PASS: daemon re-run: still one reference
-  info: second PF user (like a VPN kill switch) took token 12371628941373087297
+  info: second PF user (like a VPN kill switch) took token 11065328542641668787
 == T5 verify_dns_stack completes
 [✗]   [1] Quad9 Profile active
 [i]        Expected pattern: '9\.9\.9'
@@ -212,6 +212,17 @@ bash: /usr/local/libexec/foxhole-pf-dnslock: No such file or directory
   PASS: re-render leaves no temp files behind
   PASS: helper status still active
   PASS: T17 cleanup: PF off, no leftovers
+== T18 real Privoxy via Homebrew (base image foxhole-brew: FOXHOLE_VM_BASE=foxhole-brew; needs egress)
+[+]   [✓] Privoxy service started (brew services, runs at login)
+  PASS: install_privoxy installed the formula
+Connection to 127.0.0.1 port 8118 [tcp/privoxy] succeeded!
+  PASS: brew services started Privoxy (port 8118 listens)
+  PASS: Privoxy listens on loopback only (not exposed)
+  PASS: real Privoxy answers HTTP through the proxy
+  PASS: bypass rules written to the Privoxy config
+  PASS: real Privoxy + no VPN -> proxies ON
+  PASS: real Privoxy + VPN up -> proxies OFF
+  PASS: disable: proxies OFF and toggle gone
 == T10 vpn_daily.sh menu from another cwd (driven by expect: ask() needs a tty)
   PASS: vpn_daily [4] prints guidance
   PASS: vpn_daily [1] reports lock ACTIVE
@@ -220,6 +231,6 @@ bash: /usr/local/libexec/foxhole-pf-dnslock: No such file or directory
   PASS: no 'command not found' in vpn_daily output
   PASS: no leftovers after vpn_daily
 
-RESULT: 112 passed, 0 failed, 0 skipped
+RESULT: 120 passed, 0 failed, 0 skipped
 vmtest exit: 0
 ssh exit: 0
