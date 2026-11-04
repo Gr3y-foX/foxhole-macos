@@ -54,3 +54,21 @@ failed silently, the daemon was bootstrapped for a script that was not there, an
 T13 runs the real generated toggle against the VM's `networksetup` with a stand-in listener on `127.0.0.1:8118`:
 ON without VPN, OFF with a `utun` IPv4 tunnel, back ON, OFF while nothing listens, idempotent repeats, clean disable.
 Suite: 81 passed, 0 failed, 0 skipped.
+
+## Installer run in the VM (`mac-hardening-install.sh`, Homebrew installed, `FOXHOLE_ASSUME_YES=1`)
+
+The base installer had never been run end to end. Findings and fixes:
+
+| Step | Problem | Fix |
+|---|---|---|
+| Firewall | Stealth mode + "allow signed" off make the application firewall drop **incoming SSH**, including open sessions (the VM became unreachable; no allow rule for `sshd` helped) | Warn and ask to skip when port 22 is listening |
+| OverSight | `objective-see.org/downloads/OverSight.zip` is a 404; the page auto-detect returns old zips; the app is named `OverSight Installer.app` (space) but the script looked for `OverSight_Installer.app`; predictable `/tmp` paths | Pinned GitHub release `v2.4.0` (its SHA-1 matches the one already in the script), `find -name "OverSight*Installer.app"`, `mktemp -d` |
+| brew-vulns | `homebrew/brew-vulns` is archived (merged into Homebrew); `brew install homebrew/brew-vulns/brew-vulns` fails | Check the built-in `brew vulns`, `brew update` if missing |
+| Mergen | `releases/latest/download/Mergen.dmg` is a 404 (asset is `Mergen-2.3.dmg`) | Resolve the asset via the API, verify against `SHA256SUMS.txt`, parse the mount point, `mktemp -d` |
+| Gatekeeper | `if GK=$(spctl --status)` – `spctl` exits 1 when disabled, so the disabled case printed "Unable to determine" and never offered to enable | Do not test the exit code |
+| BlockBlock cask | Its installer needs a GUI session and waited forever in the headless VM (not a script bug) | – |
+| Other | `OS`/`Mergen` prompts and `brew` subprocesses read from stdin; piped answers are eaten – use `FOXHOLE_ASSUME_YES` | – |
+
+T15 covers the OverSight pin and archive layout, the Mergen install with checksum, and the Gatekeeper case
+(stubbed `spctl`, because macOS 26 does not let a script switch Gatekeeper off again).
+Suite: 93 passed, 0 failed, 0 skipped.

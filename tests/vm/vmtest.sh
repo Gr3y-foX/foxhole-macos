@@ -214,6 +214,49 @@ kill $LPID 2>/dev/null; wait $LPID 2>/dev/null
 chk "disable: daemon, plist and script gone" '! sudo launchctl print system/com.hardening.proxytoggle >/dev/null 2>&1 && ! test -e /Library/LaunchDaemons/com.hardening.proxytoggle.plist && ! test -e /usr/local/bin/proxy-toggle.sh'
 chk "disable: system proxies OFF" '[[ "$(wproxy)" == No && "$(sproxy)" == No ]]'
 
+echo "== T15 installer fixes (functions extracted from mac-hardening-install.sh; needs egress)"
+INST=./mac-hardening-install.sh
+fn() { sed -n "/^$1() {/,/^}/p" "$INST"; }
+chk "installer has no tap/install of homebrew/brew-vulns" '! grep -q "brew install homebrew/brew-vulns" $INST'
+if [[ "$NET_OK" != 1 ]]; then
+    skip "T15 installer downloads"
+else
+    # Homebrew is only present in the foxhole-brew based image; the others skip these
+    OSV=$(grep '^OVERSIGHT_VERSION=' $INST | cut -d'"' -f2)
+    OSURL="https://github.com/objective-see/OverSight/releases/download/v${OSV}/OverSight_${OSV}.zip"
+    OSSHA=$(grep '^OVERSIGHT_ZIP_SHA1=' $INST | cut -d'"' -f2)
+    curl -fsSL -m60 -o /tmp/os.zip "$OSURL"
+    chk "OverSight pinned release downloads and matches the pinned SHA-1" '[[ "$(shasum -a 1 /tmp/os.zip | awk "{print toupper(\$1)}")" == "$OSSHA" ]]'
+    chk "archive holds \"OverSight Installer.app\" (name with a space)" '[[ "$(unzip -l /tmp/os.zip | grep -c "OverSight Installer.app/")" -ge 1 ]]'
+    chk "script looks for OverSight*Installer.app" 'grep -q "OverSight\*Installer.app" $INST'
+    eval "$(fn _install_mergen)"
+    sudo rm -rf /Applications/Mergen.app
+    _install_mergen > /tmp/t15-mergen.out 2>&1; sed 's/\x1b\[[0-9;]*m//g' /tmp/t15-mergen.out | grep -E "URL|SHA|installed|✗|\[!\]" | head -6
+    chk "Mergen: resolved the real .dmg asset and verified SHA-256" 'grep -q "SHA-256 verified" /tmp/t15-mergen.out'
+    chk "Mergen: app installed" 'test -d /Applications/Mergen.app'
+    chk "Mergen: temp dir and mount cleaned up" '! ls -d /tmp/mergen.* >/dev/null 2>&1 && ! mount | grep -qi "/Volumes/Mergen"'
+    sudo rm -rf /Applications/Mergen.app
+fi
+# Gatekeeper: real `spctl --status` exits 1 when assessments are disabled (stock Cirrus
+# image; macOS 26 will not let a script switch it off again), so emulate that with stubs.
+eval "$(fn check_gatekeeper_filevault)"
+rm -f /tmp/gk_on
+(
+    spctl() {
+        case "$1" in
+            --status) if [[ -f /tmp/gk_on ]]; then echo "assessments enabled"; return 0
+                      else echo "assessments disabled"; return 1; fi ;;
+            --master-enable) touch /tmp/gk_on ;;
+        esac
+    }
+    sudo() { if [[ "$1" == spctl ]]; then shift; spctl "$@"; else command sudo "$@"; fi; }
+    FOXHOLE_ASSUME_YES=1 check_gatekeeper_filevault
+) > /tmp/t15-gk.out 2>&1
+sed 's/\x1b\[[0-9;]*m//g' /tmp/t15-gk.out | grep -E "Gatekeeper" | head -4
+chk "Gatekeeper: disabled state (exit 1) is detected, no 'Unable to determine'" '! grep -q "Unable to determine" /tmp/t15-gk.out && grep -q "DISABLED" /tmp/t15-gk.out'
+chk "Gatekeeper: --master-enable issued after answering yes" 'test -f /tmp/gk_on'
+rm -f /tmp/gk_on
+
 echo "== T10 vpn_daily.sh menu from another cwd (driven by expect: ask() needs a tty)"
 cat > /tmp/vd.exp <<'EXP'
 set timeout 30
