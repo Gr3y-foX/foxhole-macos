@@ -101,10 +101,13 @@ Key building blocks include:
   - `prepare_pf_dns_lock_anchor`
     Writes the anchor `/etc/pf.anchors/com.hardening.dnsleak`:
     - Passes loopback, all VPN tunnels (`utun0`–`utun15`, listed explicitly: PF on macOS has no `utun+` wildcard) and ICMPv6 (RFC 4890).
-    - Whitelists the Quad9 resolvers.
+    - Applies the DNS policy (`FOXHOLE_DNS_MODE`, or a prompt in the menu; unattended runs and `FOXHOLE_ASSUME_YES=1` use `doh`):
+      - `doh` (default): Quad9 is reachable on **tcp 443 only** (the DoH profile); plain DNS to 9.9.9.9 is blocked.
+      - `vpn`: no Quad9 exception; DNS leaves only through the VPN tunnel. Set your resolver inside the VPN (for example Mullvad with Quad9).
+      - `plain`: Quad9 on any port (plain DNS to 9.9.9.9), for setups without a DoH profile.
     - Blocks plain DNS and DNS‑over‑TLS (ports 53/853, IPv4 and IPv6) on **physical interfaces only** (`en*`, detected with `networksetup`).
   - `enable_pf_dns_lock` (v0.17.3+)
-    Loads the rules into `com.apple/foxhole.dnsleak`, a child of the `com.apple/*` anchor that the stock `/etc/pf.conf` already evaluates. `/etc/pf.conf` is **not edited** and the main ruleset is **not reloaded**, so other PF users (e.g. a VPN kill switch) keep their rules. PF is enabled with a reference token (`pfctl -E`). A helper (`/usr/local/libexec/foxhole-pf-dnslock start|stop|status`) does the work. A LaunchDaemon runs it again at every boot. Enable refuses to run if the main ruleset does not evaluate `com.apple/*`.
+    Loads the rules into `com.apple/foxhole.dnsleak`, a child of the `com.apple/*` anchor that the stock `/etc/pf.conf` already evaluates. `/etc/pf.conf` is **not edited** and the main ruleset is **not reloaded**, so other PF users (e.g. a VPN kill switch) keep their rules. PF is enabled with a reference token (`pfctl -E`). A helper (`/usr/local/libexec/foxhole-pf-dnslock start|stop|status`) does the work. A LaunchDaemon runs it again at every boot. At each start it re-reads the physical interfaces, so a network card added later is covered too (falls back to the rules as written). Enable refuses to run if the main ruleset does not evaluate `com.apple/*`.
   - `disable_pf_dns_lock`
     Flushes the rules and releases the token (`pfctl -X`), so PF goes back to off unless another program still holds a reference. Removes the helper, the rules file and the LaunchDaemon. Installs from v0.17.2 or older, which edited `/etc/pf.conf`, are cleaned up automatically on enable or disable.
   - Inspect: `sudo pfctl -a com.apple/foxhole.dnsleak -sr` (rules), `sudo pfctl -s References` (who keeps PF on), `/var/log/foxhole-pf.log`.
@@ -165,7 +168,7 @@ Menu actions:
 - **[5] Reset** — calls `reset_net_hardening` from the netlib
 - **[6] Exit**
 
-Requires the Quad9 DoH profile to be installed first; otherwise the PF lock breaks DNS.
+In the default `doh` and in `plain` mode the Quad9 DoH profile (or a Quad9 plain-DNS resolver) must be set up first; otherwise the PF lock breaks DNS. In `vpn` mode set the DNS resolver inside your VPN. The lock asks for the mode when you enable it.
 
 This profile is intentionally **non‑destructive** and aims to be safe for non‑experts.
 
@@ -219,6 +222,11 @@ bash vpn_daily.sh
 bash profile-paranoid-tor.sh
 
 ```
+
+### Unattended runs and tests
+- `FOXHOLE_ASSUME_YES=1` answers every prompt "y" (the DNS mode defaults to `doh`; set `FOXHOLE_DNS_MODE=doh|vpn|plain` to choose).
+- `bash tests/ci/offline.sh` checks the scripts without touching the system.
+- `FOXHOLE_VM_NET=bridged bash tests/vm/run.sh --reset` runs the full suite in a Tart VM (never on your Mac). Logs go to `docs/testing/`.
 
 ---
 
