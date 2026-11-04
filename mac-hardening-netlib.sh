@@ -668,6 +668,9 @@ enable_privoxy_vpn_autoswitch() {
         warn "Overwriting existing proxy-toggle.sh (SHA-256: ${EXISTING_HASH})"
     fi
 
+    # /usr/local/bin does not exist on a clean Apple Silicon Mac
+    sudo mkdir -p "$(dirname "$TOGGLE_SCRIPT")" \
+        || die "Cannot create $(dirname "$TOGGLE_SCRIPT")"
     sudo tee "$TOGGLE_SCRIPT" > /dev/null << 'SCRIPT'
 #!/bin/bash
 LOG="/var/log/proxy-toggle.log"
@@ -752,6 +755,7 @@ else
     set_proxy on
 fi
 SCRIPT
+    [[ -s "$TOGGLE_SCRIPT" ]] || die "Failed to write ${TOGGLE_SCRIPT}"
 
     sudo chown root:wheel "$TOGGLE_SCRIPT"
     sudo chmod 755 "$TOGGLE_SCRIPT"
