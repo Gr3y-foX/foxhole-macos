@@ -9,6 +9,14 @@ Long session on 2026-11-03 took `debug` from v0.17.2 to v0.17.3:
 
 The goal of the next session: close the unverified work, get the user's 4 design decisions, finish merge prep, and open the PR `debug` → `main` **only when the user asks**.
 
+## Status update — 2026-11-04 (overrides the "State" section below where they differ)
+- Step 1.2 done: fresh-VM suite **100 passed / 0 failed / 0 skipped** incl. T16 (`vm-test-2026-11-03_233425.log`). Pushed.
+- Step 1.3 done: push works with `arch -arm64 /usr/bin/git push -u origin debug`.
+- Step 1.4 **blocked**: every GitHub Actions run fails with "account is locked due to a billing issue" before any step starts. Needs the account owner to fix billing, then re-run `lint` for `debug`.
+- Step 1.5 open: remote still points at `macos-sec-harder-26`; GitHub says the repo moved to `foxhole-macos`.
+- Step 2 (decisions D1–D4) still open: waiting for the user.
+- 2026-11-04 session: `.gitnexusignore` (`free-claude-code/`) added; `AGENTS.md` is now a symlink to `CLAUDE.md`; CLAUDE.md now says to expect `UNKNOWN` for bash and states the "warn before editing" rule explicitly.
+
 ## State at the end of the session (checked read-only)
 - **Branch:** `debug` is in sync with `origin/debug` at `531695d`. There are 25 commits ahead of `main`; `main` is still at v0.16.1.
 - **Working tree:** only the user's own `CLAUDE.md` / `AGENTS.md` changes, which are a GitNexus section refresh. Don't touch them. Untracked: `.DS_Store`, `.claude/`, `free-claude-code/`.

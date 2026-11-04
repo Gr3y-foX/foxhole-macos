@@ -1,4 +1,25 @@
-# Checkpoint — 2026-11-03 (resume here)
+# Checkpoint — 2026-11-04 (resume here)
+
+## Done this session (local only, nothing pushed)
+- **Session start:** `debug` at `c3ffa61`, in sync with GitHub. Local VM suite last green: 100/0/0 (`vm-test-2026-11-03_233425.log`, includes T16).
+- **`.gitnexusignore`** added with `free-claude-code/`. GitNexus reads it (checked in its source). Re-index: 7,406 nodes → 319 nodes, so the unrelated clone is out.
+- **`AGENTS.md`** is now a symlink to `CLAUDE.md`. The two files were byte-identical, so no content was lost. Agents that read `AGENTS.md` directly still get the full text.
+- **`CLAUDE.md`** (GitNexus section):
+  - the "warn the user before editing" rule for HIGH/CRITICAL risk is explicit again, and says to report callers, affected processes and risk level;
+  - new note: bash functions usually resolve as `UNKNOWN`, so confirm callers with `grep -rn` over the `*.sh` files and say so.
+- **`NEXT_SESSION.md`:** status section added at the top (T16 green, push works with native git, CI blocked by billing, remote URL still open, D1–D4 still open).
+- **Lint:** `bash -n` on all scripts and `shellcheck -S warning` clean.
+
+## Not done (needs your answer or GitHub)
+- **CI:** still blocked by GitHub's billing lock on the account. Nothing to fix in the workflow.
+- **Decisions D1–D4** (Quad9 port 443, interfaces added later, old-install PF message, `debug_netlib/`): not decided.
+- **Remote URL:** still `macos-sec-harder-26`; the repo moved to `foxhole-macos`.
+- **GitNexus stats** in `CLAUDE.md` still say 7373 symbols. They were generated with the unrelated clone included. Re-generating them would rewrite your block, so I left it for you to decide.
+- **`.claude/skills` table** in `CLAUDE.md` points at untracked files. Commit the skills or drop the table: your call.
+- **Real Mullvad test**, real Privoxy and WireGuard in the VM, DoH profile image: need you at the Mac or more time.
+
+## Your uncommitted edits
+- The GitNexus refresh you had in `CLAUDE.md`/`AGENTS.md` is included in this local commit, together with my changes, because the two files are now one. Revert that hunk if you didn't want it committed.
 
 ## Branch / PR state
 - Work branch: `debug`. `main` is still v0.16.1. **Never push to main; work only on `debug`.**
