@@ -17,12 +17,21 @@ Don't touch the user's uncommitted `CLAUDE.md` / `AGENTS.md`.
   - [x] Guard verified on the host with a throwaway script (x86_64 shell → re-exec → arm64)
   - [x] VM re-run after `77c92e6`: 31 pass / 0 fail / 4 skip — `vm-test-2026-11-03_171053.log` (VM is native arm64, so the guard is a no-op there; the x86_64 path is covered by the host test)
   - [x] Installer: moved the guard above the `# Do not run as root` comment it had split from its check
-- [ ] 1.2 Load rules into `com.apple/foxhole.dnsleak` (`pfctl -a … -f`), no `pf.conf` edit, no `pfctl -f /etc/pf.conf`
+- [x] 1.2 Load rules into `com.apple/foxhole.dnsleak` (`pfctl -a … -f`), no `pf.conf` edit, no `pfctl -f /etc/pf.conf`
   - offline: `pfctl -nvf` on the generated anchor; VM: enable/disable + Mullvad-style coexistence
   - keep rollback for installs that still have the old `pf.conf` marker block
-- [ ] 1.3 `pfctl -E` token stored under `~/.foxhole/` (or `/var/db/foxhole/`), `pfctl -X <token>` on disable
-- [ ] 1.4 `launchctl bootstrap|bootout system` instead of `load|unload` (netlib lines ~316, 347, 612–630)
-- [ ] Version bump + note in `docs/v 0.17/` once 1.2–1.4 change behaviour
+  - VM research 2026-11-03 (clean VM, macOS 26.6.2): stock main ruleset has `anchor "com.apple/*"` (loaded at boot by `com.apple.pfctl`, PF off);
+    a child `com.apple/foxhole.dnsleak` is evaluated (block-rule packet counters rise), survives `pfctl -f /etc/pf.conf`;
+    `pfctl -E` tokens outlive the process, are ref-counted with other holders, vanish at reboot.
+  - Design: helper `/usr/local/libexec/foxhole-pf-dnslock start|stop|status` (single code path for enable/disable/boot);
+    token in `/var/db/foxhole/pf.token`; LaunchDaemon runs `helper start`; enable aborts if main ruleset lacks `com.apple/*`;
+    `_pf_legacy_cleanup` removes the old pf.conf marker block once.
+- [x] 1.3 `pfctl -E` token stored under `~/.foxhole/` (or `/var/db/foxhole/`), `pfctl -X <token>` on disable
+- [x] 1.4 `launchctl bootstrap|bootout system` instead of `load|unload` (netlib lines ~316, 347, 612–630)
+- [x] Version bump → 0.17.3 + `docs/v 0.17/netlib_v0.17.3.md`
+  - [x] VM: `run.sh --reset` 49/0/4 (logs 175310, 175751); reboot test: lock re-applied at boot with a new token
+  - [ ] Real Mullvad on the host side-by-side (simulated with a 2nd `pfctl -E` holder only)
+  - [ ] `run.sh --reset` right after a VM reboot once produced no log (VM still stopping?) — make reset wait for `tart stop`
 
 ## Step 1b — offline bug sweep (2026-11-03, SSD unplugged)
 - [x] proxy-toggle `vpn_active`: `(Disconnected)` matched → proxy never ON; + utun/IPv4 detection (Mullvad)
@@ -53,4 +62,5 @@ Don't touch the user's uncommitted `CLAUDE.md` / `AGENTS.md`.
 ## Log
 - 2026-11-03: plan written; Step 0 / 1.1 checked. Logs 170637/170811/170950 are runs cut off by a dropped SSH session (left untracked); 171053 is the good one.
 - 2026-11-03 evening: user unplugged the SSD; did the offline bug sweep (Step 1b). Details: `docs/v 0.17/netlib_v0.17.2-changes.md` → Second pass.
-- Next: 1.2 (`com.apple/foxhole.dnsleak` anchor) offline prototype; VM checks when the SSD is back.
+- 2026-11-03 night: SSD back. Step 1.2–1.4 done ("big guy"): VM research → helper/token design → 49/0/4 + reboot test. New `tests/vm/vm.sh` for ad-hoc VM work.
+- Next: Step 2 (VM egress, DoH image), open questions in Step 1b.
