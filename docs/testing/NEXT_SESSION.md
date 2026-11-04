@@ -13,9 +13,9 @@ The goal of the next session: close the unverified work, get the user's 4 design
 Read `CHECKPOINT.md` first, then `SESSION_PLAN.md`. Summary:
 - Pushed over SSH (`origin` = `git@github-foxhole:Gr3y-foX/foxhole-macos.git`; run `ssh`/`git push` outside the sandbox).
 - D1 done: `FOXHOLE_DNS_MODE` = `doh` (default, Quad9 tcp 443 only) / `vpn` / `plain`. D2 done: boot helper re-renders interfaces (rules via `pfctl -f -`, no temp file). D3: keep the `sudo pfctl -d` message. D4 done: `debug_netlib/` is in `docs/archive/`.
-- VM suite: 120/0/0 on the Homebrew image (`FOXHOLE_VM_BASE=foxhole-brew`, includes T18 real Privoxy), 112/0/1 on the clean image. Offline 17/17.
+- VM suite: 125/0/0 on the Homebrew image (`FOXHOLE_VM_BASE=foxhole-brew`, includes T18 real Privoxy and T19 real WireGuard), 112/0/1 on the clean image. Offline 17/17.
 - Installer option [2] (Tor profile) is now marked "planned" and does not run the stub.
-- Still open: CP7 (review `docs/testing/CLAUDE_MD_DRAFT.md`, apply to CLAUDE.md if the user agrees; stale GitNexus stats and `.claude/skills` table in CLAUDE.md), CP9 (PR only if asked), CI (account billing), real Mullvad / WireGuard / DoH image (need the user; the Mullvad account number must never be stored).
+- Still open: CP7 (review `docs/testing/CLAUDE_MD_DRAFT.md`, apply to CLAUDE.md if the user agrees; stale GitNexus stats and `.claude/skills` table in CLAUDE.md), CP9 (PR only if asked), CI (account billing), real Mullvad / DoH image (need the user; the Mullvad account number must never be stored).
 
 ## State at the end of the session (checked read-only)
 - **Branch:** `debug` is in sync with `origin/debug` at `531695d`. There are 25 commits ahead of `main`; `main` is still at v0.16.1.

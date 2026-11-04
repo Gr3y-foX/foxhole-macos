@@ -53,7 +53,7 @@ pass in quick on utun0 all flags S/SA keep state
 pass in quick on utun1 all flags S/SA keep state
 pass in quick on utun2 all flags S/SA keep state
 pass in quick on utun3 all flags S/SA keep state
-  info: udp/53 block-rule packets after dig @8.8.8.8: 8
+  info: udp/53 block-rule packets after dig @8.8.8.8: 17
   PASS: DNS to 8.8.8.8 hits the block rule
   PASS: plain DNS @8.8.8.8 blocked
   PASS: plain DNS to Quad9 @9.9.9.9:53 blocked in the default doh mode
@@ -67,7 +67,7 @@ pass out quick inet proto tcp from any to 149.112.112.11 port = 443 flags S/SA k
   PASS: second enable: still one reference
   PASS: rules survive a main-ruleset reload (pfctl -f /etc/pf.conf)
   PASS: daemon re-run: still one reference
-  info: second PF user (like a VPN kill switch) took token 11065328542641668787
+  info: second PF user (like a VPN kill switch) took token 17647093767191050900
 == T5 verify_dns_stack completes
 [✗]   [1] Quad9 Profile active
 [i]        Expected pattern: '9\.9\.9'
@@ -223,6 +223,14 @@ Connection to 127.0.0.1 port 8118 [tcp/privoxy] succeeded!
   PASS: real Privoxy + no VPN -> proxies ON
   PASS: real Privoxy + VPN up -> proxies OFF
   PASS: disable: proxies OFF and toggle gone
+== T19 real WireGuard tunnel (wireguard-go: two peers in the VM) with the lock on (needs Homebrew + egress)
+  info: tunnel ends utun4 <-> utun5 (UDP over 127.0.0.1)
+  PASS: lock is active with a real WireGuard interface present
+  PASS: DNS to a resolver behind the tunnel passes the lock (query arrived decrypted on the peer)
+  PASS: WireGuard handshake completed
+  info: udp/53 block-rule packets without the tunnel route: 2
+  PASS: same query without the tunnel route leaves a physical interface and is blocked
+  PASS: T19 cleanup: PF off, no leftovers
 == T10 vpn_daily.sh menu from another cwd (driven by expect: ask() needs a tty)
   PASS: vpn_daily [4] prints guidance
   PASS: vpn_daily [1] reports lock ACTIVE
@@ -231,6 +239,6 @@ Connection to 127.0.0.1 port 8118 [tcp/privoxy] succeeded!
   PASS: no 'command not found' in vpn_daily output
   PASS: no leftovers after vpn_daily
 
-RESULT: 120 passed, 0 failed, 0 skipped
+RESULT: 125 passed, 0 failed, 0 skipped
 vmtest exit: 0
 ssh exit: 0

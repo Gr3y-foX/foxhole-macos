@@ -56,7 +56,7 @@ Don't touch the user's uncommitted `CLAUDE.md` / `AGENTS.md`.
 - [x] T13 real `proxy-toggle.sh` + LaunchDaemon + networksetup with a stand-in listener (found: `/usr/local/bin` missing on clean Apple Silicon → script never written)
 - [x] T14 `FOXHOLE_ASSUME_YES`
 - [x] Base installer run end to end in the VM (`foxhole-brew` image = clean + Homebrew + CLT): 6 findings fixed (see `docs/v 0.17/netlib_v0.17.3.md`, "Installer run"), T15 tests
-- [x] Real Privoxy binary in the VM: T18 (8/8, `FOXHOLE_VM_BASE=foxhole-brew`, 2026-11-04). [ ] Real WireGuard still open
+- [x] Real Privoxy binary in the VM: T18 (8/8, `FOXHOLE_VM_BASE=foxhole-brew`, 2026-11-04). [x] Real WireGuard in the VM: T19 (5/5, wireguard-go, 2026-11-04)
 - [ ] BlockBlock cask installer needs a GUI session (hangs headless) — maybe add a timeout around cask installs
 
 - [x] `create_net_backup` writes `restore.sh` (the old message pointed at a non-existent `rollback.sh`); T16 green — fresh-VM run 100/0/0 (`vm-test-2026-11-03_233425.log`)

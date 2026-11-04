@@ -330,6 +330,44 @@ else
     pkill -x privoxy 2>/dev/null; brew services stop privoxy >/dev/null 2>&1
 fi
 
+echo "== T19 real WireGuard tunnel (wireguard-go: two peers in the VM) with the lock on (needs Homebrew + egress)"
+for B in /opt/homebrew/bin/brew /usr/local/bin/brew; do [[ -x $B ]] && eval "$($B shellenv)" && break; done
+if ! command -v brew >/dev/null 2>&1 || [[ "$NET_OK" != 1 ]]; then
+    echo "  SKIP: T19 real WireGuard (needs Homebrew in the VM and internet; use FOXHOLE_VM_BASE=foxhole-brew)"; SKIP=$((SKIP+1))
+else
+    brew list --formula wireguard-tools >/dev/null 2>&1 || brew install wireguard-tools wireguard-go >/tmp/t19-brew.out 2>&1
+    WD=$(mktemp -d); (
+        cd "$WD" && umask 077
+        wg genkey > ka; wg genkey > kb
+        sudo env WG_TUN_NAME_FILE="$WD/na" wireguard-go utun >/dev/null 2>&1; sleep 1
+        sudo env WG_TUN_NAME_FILE="$WD/nb" wireguard-go utun >/dev/null 2>&1; sleep 1
+    )
+    UA=$(sudo cat "$WD/na"); UB=$(sudo cat "$WD/nb")
+    PA=$(wg pubkey < "$WD/ka"); PB=$(wg pubkey < "$WD/kb")
+    echo "  info: tunnel ends $UA <-> $UB (UDP over 127.0.0.1)"
+    sudo wg set "$UA" private-key "$WD/ka" listen-port 51820 peer "$PB" allowed-ips 192.0.2.0/24 endpoint 127.0.0.1:51821
+    sudo wg set "$UB" private-key "$WD/kb" listen-port 51821 peer "$PA" allowed-ips 10.77.0.1/32 endpoint 127.0.0.1:51820
+    sudo ifconfig "$UA" inet 10.77.0.1 10.77.0.9 netmask 255.255.255.255 up
+    sudo ifconfig "$UB" inet 10.77.0.2 10.77.0.1 netmask 255.255.255.255 up
+    sudo route -n add -net 192.0.2.0/24 -interface "$UA" >/dev/null 2>&1
+    FOXHOLE_DNS_MODE=doh prepare_pf_dns_lock_anchor >/dev/null 2>&1; enable_pf_dns_lock >/dev/null 2>&1
+    chk "lock is active with a real WireGuard interface present" 'sudo bash $HELPER status'
+    sudo tcpdump -i "$UB" -n -c 1 -w "$WD/cap.pcap" udp port 53 >/dev/null 2>&1 &
+    TP=$!; sleep 1
+    dig +time=2 +tries=1 @192.0.2.53 example.com >/dev/null 2>&1
+    sleep 1; sudo kill $TP 2>/dev/null; wait $TP 2>/dev/null
+    chk "DNS to a resolver behind the tunnel passes the lock (query arrived decrypted on the peer)" 'sudo tcpdump -nr "$WD/cap.pcap" 2>/dev/null | grep -q "192\.0\.2\.53\.53"'
+    chk "WireGuard handshake completed" 'sudo wg show "$UA" latest-handshakes | grep -qE "[[:space:]][1-9][0-9]*$"'
+    sudo route -n delete -net 192.0.2.0/24 >/dev/null 2>&1
+    pfq -a $A -z >/dev/null
+    dig +time=1 +tries=2 @192.0.2.53 example.com >/dev/null 2>&1
+    B=$(blk53); echo "  info: udp/53 block-rule packets without the tunnel route: $B"
+    chk "same query without the tunnel route leaves a physical interface and is blocked" '[[ "$B" -gt 0 ]]'
+    disable_pf_dns_lock >/dev/null 2>&1
+    sudo pkill -x wireguard-go 2>/dev/null; rm -rf "$WD"
+    chk "T19 cleanup: PF off, no leftovers" '! pf_on && ! test -e $RULES'
+fi
+
 echo "== T10 vpn_daily.sh menu from another cwd (driven by expect: ask() needs a tty)"
 cat > /tmp/vd.exp <<'EXP'
 set timeout 30

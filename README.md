@@ -226,7 +226,7 @@ bash profile-paranoid-tor.sh
 ### Unattended runs and tests
 - `FOXHOLE_ASSUME_YES=1` answers every prompt "y" (the DNS mode defaults to `doh`; set `FOXHOLE_DNS_MODE=doh|vpn|plain` to choose).
 - `bash tests/ci/offline.sh` checks the scripts without touching the system.
-- `FOXHOLE_VM_NET=bridged bash tests/vm/run.sh --reset` runs the full suite in a Tart VM (never on your Mac). Logs go to `docs/testing/`. `FOXHOLE_VM_BASE=foxhole-brew` starts from an image with Homebrew, which also runs the real-Privoxy test (T18).
+- `FOXHOLE_VM_NET=bridged bash tests/vm/run.sh --reset` runs the full suite in a Tart VM (never on your Mac). Logs go to `docs/testing/`. `FOXHOLE_VM_BASE=foxhole-brew` starts from an image with Homebrew, which also runs the real-Privoxy (T18) and real-WireGuard (T19) tests.
 
 ---
 
