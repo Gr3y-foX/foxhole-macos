@@ -31,7 +31,7 @@ Don't touch the user's uncommitted `CLAUDE.md` / `AGENTS.md`.
 - [x] Version bump → 0.17.3 + `docs/v 0.17/netlib_v0.17.3.md`
   - [x] VM: `run.sh --reset` 49/0/4 (logs 175310, 175751); reboot test: lock re-applied at boot with a new token
   - [ ] Real Mullvad on the host side-by-side (simulated with a 2nd `pfctl -E` holder only)
-  - [ ] `run.sh --reset` right after a VM reboot once produced no log (VM still stopping?) — make reset wait for `tart stop`
+  - [x] `run.sh --reset` right after a VM reboot once produced no log — fixed by the graceful shutdown (`e240e12`)
 
 ## Step 1b — offline bug sweep (2026-11-03, SSD unplugged)
 - [x] proxy-toggle `vpn_active`: `(Disconnected)` matched → proxy never ON; + utun/IPv4 detection (Mullvad)
@@ -42,7 +42,7 @@ Don't touch the user's uncommitted `CLAUDE.md` / `AGENTS.md`.
 - [x] `update_hosts` download + validate before editing `/etc/hosts`
 - [x] Installer: drop dnscrypt-proxy, `ask` without eval, script names
 - [x] shellcheck `-S warning` clean (install, netlib, vpn_daily)
-- [ ] VM: run Privoxy menu [3] + toggle with a real Privoxy (needs SSD)
+- [x] Privoxy toggle + LaunchDaemon tested in the VM (T13, stand-in listener); real Privoxy binary still open (Step 2)
 - [ ] Open question for the user: Quad9 whitelist passes **any port** (incl. plain DNS :53 to 9.9.9.9 outside the VPN); restrict to 443 (DoH)?
 - [ ] Open question: block rules only cover interfaces present at enable time; a USB/Thunderbolt NIC added later is not blocked until re-enable
 
@@ -59,6 +59,8 @@ Don't touch the user's uncommitted `CLAUDE.md` / `AGENTS.md`.
 - [ ] Real Privoxy binary / WireGuard in the VM (brew is in `foxhole-brew`; `foxhole-test` is cloned from it for installer runs — `run.sh --reset` still clones `foxhole-clean`)
 - [ ] BlockBlock cask installer needs a GUI session (hangs headless) — maybe add a timeout around cask installs
 
+- [x] `create_net_backup` writes `restore.sh` (the old message pointed at a non-existent `rollback.sh`); T16 green — fresh-VM run 100/0/0 (`vm-test-2026-11-03_233425.log`)
+
 ## Step 3 — P3 quality / merge prep
 - [x] `FOXHOLE_ASSUME_YES=1` for `ask` (netlib + installer; T14, `tests/ci/offline.sh`)
 - [x] Shellcheck warnings in shipped scripts (SC2229, SC2155, SC2034); `BASE_SUM` removed
@@ -71,3 +73,4 @@ Don't touch the user's uncommitted `CLAUDE.md` / `AGENTS.md`.
 - 2026-11-03 evening: user unplugged the SSD; did the offline bug sweep (Step 1b). Details: `docs/v 0.17/netlib_v0.17.2-changes.md` → Second pass.
 - 2026-11-03 night: SSD back. Step 1.2–1.4 done ("big guy"): VM research → helper/token design → 49/0/4 + reboot test. New `tests/vm/vm.sh` for ad-hoc VM work.
 - 2026-11-03 night: Step 2 egress + T11 done (64/0/0 twice). Next: WireGuard/Privoxy tests, then Step 3.
+- 2026-11-03 (next day session): T16 verified (first run found a test-side pf.conf assertion; fixed). Fresh-VM suite 100/0/0. Pushed.
