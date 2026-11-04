@@ -6,7 +6,7 @@ Read first: this file, then `SESSION_PLAN.md` (checkpoint list CP0–CP10), then
 - Docs layout (reorganised 2026-11-05): `docs/changelog/` (release notes), `docs/testing/` (README, `reports/`, `logs/`), `docs/dev/` (these working notes, PR text, CLAUDE.md draft), `docs/archive/`. Index: `docs/README.md`. `tests/vm/run.sh` now writes logs to `docs/testing/logs/`.
 - PR #1 could not be retitled by the session (GitHub integration returned 403); paste the title/body from `docs/dev/PR-1-text.md` by hand.
 - Branch `debug`, remote `origin` = `git@github-foxhole:Gr3y-foX/foxhole-macos.git` (SSH works; run `ssh`/`git push` outside the sandbox, the sandbox blocks DNS).
-- Done: CP0, CP1, CP3, CP4, D2, D4, CP8 (GitNexus re-indexed, detect-changes low), README + report + changelog, T18 real Privoxy, T19 real WireGuard. Open: CP7 CLAUDE.md text (draft in `CLAUDE_MD_DRAFT.md`, needs the user), CP9 PR decision.
+- Done: CP0, CP1, CP3, CP4, D2, D4, CP8 (GitNexus re-indexed, detect-changes low), README + report + changelog, T18 real Privoxy, T19 real WireGuard. CLAUDE.md rewritten for v0.17.3 and the docs layout (2026-11-05). Open: retitle PR #1 by hand (`PR-1-text.md`), real Mullvad / DoH tests.
 - PR `debug` → `main`: **PR #1 is already open** (created by the user 2026-11-03; title still "fix(netlib): v0.16 — Phase 1+2 audit fixes", so the old notes saying "no PR exists" were stale). Every push to `debug` updates it. Ask the user before changing its title/body; the text below is the suggested new one. PR text: title `v0.17.3: PF DNS lock in com.apple/* child anchor, installer fixes, VM test suite`; body from `docs/changelog/v0.17.3.md` + VM result + open items.
 - CI: green on `debug` since the billing lock was lifted (lint push + pull_request runs).
 
@@ -25,8 +25,8 @@ Read first: this file, then `SESSION_PLAN.md` (checkpoint list CP0–CP10), then
 
 ## Next steps (in order)
 1. (done) D1/D2/D4, README, report, changelog, GitNexus (CP8), T18 real Privoxy, installer Tor option.
-2. CP7 rest: show the user `docs/dev/CLAUDE_MD_DRAFT.md` (new "Commands"/"Testing" text for CLAUDE.md) and apply only if they agree; ask about the stale GitNexus stats (7373 symbols) and the `.claude/skills` table in CLAUDE.md.
-3. CP9: PR #1 exists. Ask the user whether to retitle it with the text above (the current title is v0.16) and whether to subscribe to its activity (`subscribe_pr_activity`).
+2. (done) CLAUDE.md updated (layout, commands, PF design, DNS modes, testing, working notes; GitNexus stats refreshed). Its GitNexus block is auto-generated: after the next `analyze` the numbers may change again. The `.claude/skills` table there still points at untracked files: commit the skills or drop the table.
+3. PR #1: retitle it by hand with `docs/dev/PR-1-text.md` (the session connection gets 403 on edits); then decide on merge and on `subscribe_pr_activity`.
 4. CI: `lint` is green on push and pull_request for `5afa8fb`, `e7ae7dd`, `c4984a2` (checked via the public API 2026-11-04 night); re-check after new pushes.
 5. Optional: GUI-cask timeout in the installer (only affects headless VMs); real Mullvad test (needs the user, see below); `foxhole-doh` image (GUI click).
 

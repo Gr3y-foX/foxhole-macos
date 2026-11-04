@@ -12,54 +12,68 @@ These scripts change **live system state** (firewall, `/etc/pf.conf`, `/etc/host
 
 | Path | Role |
 |---|---|
-| `mac-hardening-install.sh` | Base installer: Homebrew, app firewall, security tools (Objective-See, lynis, pip-audit…), privacy defaults. Deliberately does **not** touch PF, proxies or DNS. |
-| `mac-hardening-netlib.sh` | Network library (current v0.17.2). Source it from profiles, or run directly for its own menu. Holds PF anchor, hosts blocklist, Privoxy autoswitch, `verify_dns_stack`, `reset_net_hardening`, backups. |
+| `mac-hardening-install.sh` | Base installer: Homebrew, app firewall, security tools (Objective-See, lynis, pip-audit…), privacy defaults. Deliberately does **not** touch PF, proxies or DNS. Option [2] of its network menu (Tor profile) is a "planned" message only. |
+| `mac-hardening-netlib.sh` | Network library (current **v0.17.3**). Source it from profiles, or run directly for its own menu. Holds the PF DNS lock (anchor + boot helper + LaunchDaemon), hosts blocklist, Privoxy autoswitch, `verify_dns_stack`, `reset_net_hardening`, backups (`create_net_backup` also writes `restore.sh`). |
 | `vpn_daily.sh` | "VPN Daily" profile: sources the netlib (path resolved from the script), menu for the PF DNS lock, health check and reset. |
 | `profile-paranoid-tor.sh` | Stub (header only). Planned Tor/PF/Privoxy profile. |
-| `docs/archive/debug_netlib/`, `debug/` | Work-in-progress copies, audit reports, handoff notes, draw.io diagrams. **Not shipped**; `docs/archive/debug_netlib/handoff.md` and `docs/changelog/` are the fix lists/changelog notes for the current release. |
-| `free-claude-code/` | Unrelated, separately-cloned Python project (own CLAUDE.md, untracked). Ignore it for foxhole work. |
+| `tests/ci/offline.sh` | Offline checks (sudo shimmed, nothing touches the system). Run by CI. |
+| `tests/vm/` | Tart VM suite: `run.sh` (full run, log to `docs/testing/logs/`), `vm.sh` (ad-hoc VM work), `vmtest.sh` (runs inside the VM, sections T0–T19). |
+| `.github/workflows/lint.yml` | CI: shellcheck (Linux), bash 3.2 syntax + `tests/ci/offline.sh` (macOS). |
+| `docs/` | `changelog/` (release notes), `testing/` (README, `reports/`, `logs/`), `dev/` (maintainer working notes: start at `dev/CHECKPOINT.md`), `archive/` (old copies, audits). Index: `docs/README.md`. |
+| `debug/` | Local scratch (git-ignored): drawings, notes. Not shipped. |
+| `free-claude-code/` | Unrelated, separately-cloned Python project (own CLAUDE.md, untracked, in `.gitnexusignore`). Ignore it for foxhole work. |
 
-Branches: `main` (release), `debug` (current work). Remote `origin` is `Gr3y-foX/macos-sec-harder-26` (the GitHub repo is also known as `foxhole-macos`).
+Branches: `main` (release), `debug` (current work; **PR #1 `debug` → `main` is open**, every push to `debug` updates it). Remote `origin` is `git@github-foxhole:Gr3y-foX/foxhole-macos.git` (SSH alias from `~/.ssh/config`; the repo used to be `macos-sec-harder-26`).
 
 ## Commands
 
-There is no build system or test suite.
+The checks are scripts, not a build system.
 
 ```bash
-bash -n mac-hardening-netlib.sh          # syntax check (do this after every edit)
-shellcheck mac-hardening-*.sh vpn_daily.sh   # lint (shellcheck is NOT installed yet: brew install shellcheck)
-bash mac-hardening-install.sh            # run as normal user, never root; uses sudo internally
-bash mac-hardening-netlib.sh             # interactive netlib menu
+bash -n mac-hardening-netlib.sh                    # syntax check (after every edit)
+shellcheck -S warning mac-hardening-*.sh vpn_daily.sh tests/ci/offline.sh tests/vm/*.sh
+bash tests/ci/offline.sh                           # offline checks, nothing touches the system
+FOXHOLE_VM_NET=bridged bash tests/vm/run.sh --reset   # full suite in the Tart VM (SSD mounted)
+FOXHOLE_VM_BASE=foxhole-brew FOXHOLE_VM_NET=bridged bash tests/vm/run.sh --reset   # + real Privoxy (T18) and WireGuard (T19)
 ```
 
-Do **not** run the installer, netlib menu or any `pfctl`/`networksetup`/`launchctl` command to "test" a change unless the user asks — they modify the real machine. Prefer `bash -n`, shellcheck, and reading the code. Netlib backups go to `~/.foxhole/backups/<timestamp>/`.
+Do **not** run the installer, the netlib menu or any `pfctl`/`networksetup`/`launchctl` command on the host to test a change. They modify the real machine: use the VM. Netlib backups go to `~/.foxhole/backups/<timestamp>/` (`restore.sh` inside restores them).
 
 ## Conventions
 
 - Shell is `bash` (`#!/bin/bash`), `set -euo pipefail`. Keep scripts compatible with macOS's stock bash 3.2 (no associative arrays, no `${var,,}`, no `mapfile`).
-- Shared helpers (duplicated at the top of each script): `log` `[+]`, `warn` `[!]`, `err` `[✗]`, `info` `[i]`, `die`, `ask`. Reuse them; don't invent new output styles.
+- Shared helpers (duplicated at the top of each script): `log` `[+]`, `warn` `[!]`, `err` `[✗]`, `info` `[i]`, `die`, `ask`. Reuse them; don't invent new output styles. `FOXHOLE_ASSUME_YES=1` answers every `ask` with "y" (unattended runs and tests).
 - `ask` must never use `eval` (v0.17.1 fixed a shell-injection there) — use `printf -v`. Quote all variables; never interpolate untrusted input into `sudo`/`sh -c`/XML/plist strings.
 - Resolve Homebrew via `resolve_brew_prefix` (Intel `/usr/local` vs Apple Silicon `/opt/homebrew`) — never hard-code.
 - Anything that edits system config must be **idempotent**, wrapped in a clear marker (see PF anchor / hosts blocklist), have a matching `disable_*`/rollback, and be covered by `reset_net_hardening`. Snapshot first with `create_net_backup`.
-- PF rules must keep VPN tunnels (`utun0-9`) passing and scope blocks to physical interfaces; DNS design is macOS DoH profile (Quad9) + PF leak-lock anchor. `dnscrypt-proxy` was **removed** in v0.17.1 — don't reintroduce it.
-- Each script has a version/date header; bump it and note the change when behaviour changes. Commit style so far: `v0.17.1 - short summary` or `fix(netlib): …` / `docs: …`.
+- **PF lock design (v0.17.3):** rules live in the child anchor `com.apple/foxhole.dnsleak` (rules file `/etc/pf.anchors/com.hardening.dnsleak`). `/etc/pf.conf` is **never edited** and the main ruleset is never reloaded (VPN kill switches keep working). PF is enabled by reference token (`pfctl -E` / `-X`). One helper `/usr/local/libexec/foxhole-pf-dnslock start|stop|status` serves enable, disable and the boot LaunchDaemon; launchd uses `bootstrap`/`bootout`, never `load`/`unload`. Keep it that way.
+- PF rules must keep VPN tunnels passing (`utun0`–`utun15`, listed explicitly: PF on macOS has **no `utun+` wildcard**) and scope blocks to physical interfaces. PF prints rules differently than written (`inet proto tcp … port = 443`): test against `pfctl -sr` output, not the source text.
+- **DNS modes** (`FOXHOLE_DNS_MODE`): `doh` (default, Quad9 on tcp 443 only), `vpn` (no Quad9 exception, DNS only through the tunnel), `plain` (Quad9 any port). The design is macOS DoH profile (Quad9) + PF leak-lock anchor. `dnscrypt-proxy` was **removed** in v0.17.1 — don't reintroduce it.
+- No temp files in root-run helpers (a `/var/run` temp file once leaked from the boot daemon): pass data to `pfctl -f -` on stdin.
+- Each script has a version/date header; bump it and note the change in `docs/changelog/` when behaviour changes. Commit style so far: `v0.17.1 - short summary` or `fix(netlib): …` / `feat(netlib): …` / `docs: …` / `test(vm): …`.
 
-## Testing without touching the system
+## Testing
 
-- Generate the PF anchor with `sudo` stubbed, then check it offline: `pfctl -nvf <anchor file>`.
-- Test `disable_pf_dns_lock` against a copy of `/etc/pf.conf` by rewriting the path in a sourced copy of the function.
+- `tests/ci/offline.sh` renders the PF anchor with `sudo` stubbed (all three DNS modes) and checks it; it runs in CI.
+- `tests/vm/run.sh` runs `tests/vm/vmtest.sh` in the Tart VM `foxhole-test` (images on the SSD `Disc Samsung T7`; `foxhole-clean` is the base, `foxhole-brew` adds Homebrew). Covers enable/disable, helper start, migration from ≤0.17.2, Privoxy toggle, installer fixes, backups, DNS modes, real Privoxy, real WireGuard. Add a section there for every behaviour change, then run the whole suite; the result goes into `docs/testing/reports/`.
+- When a test fails, check whether the test or the product is wrong (twice it was the test: PF rule text, a new prompt). Don't weaken a check to get green.
 - `verify_dns_stack` is read-only apart from `sudo pfctl -s info`.
+- Details: `docs/testing/README.md`.
 
 ## Working notes
 
+- **Resume a session:** read `docs/dev/CHECKPOINT.md`, then `docs/dev/SESSION_PLAN.md` and `docs/dev/NEXT_SESSION.md`. Keep CHECKPOINT current before ending a session.
+- Work on `debug` only. No push to `main`, no PR actions unless the user asks. The session's GitHub connection can read PRs but may not edit them (403): put suggested PR text in `docs/dev/` for the user to paste.
+- Push: `git push -u origin debug` over SSH. In a sandboxed session `ssh`/`git push`/`tests/ci/offline.sh` need the sandbox off (DNS and `mktemp` are blocked).
+- Commit footer: the Co-Authored-By line from the session's attribution reminder. Never commit `.DS_Store`, `.claude/`, `.gitnexus/` or `free-claude-code/`.
+- A Mullvad account number (or any credential) the user mentions for a VM test is never written to files, git, logs or memory.
 - Docs and handoff notes mix English and Russian; reply to the user in the language they write in, write code comments and commit messages in English.
-- Don't commit `.DS_Store`, `.gitnexus/` index files or `free-claude-code/`.
 - The user's home directory is itself a git repo; stay inside this repo's root for all git operations.
 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **macos-sec-harder-26** (7373 symbols, 18514 relationships, 400 execution flows).
+This project is indexed by GitNexus as **macos-sec-harder-26** (348 symbols, 338 relationships, 0 execution flows; re-run `analyze` to refresh).
 
 > Index stale? Run `node .gitnexus/run.cjs analyze --index-only` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? Bootstrap with `npx`, `bunx`, or `pnpm dlx` — e.g. `bunx gitnexus@latest analyze` (npm 11 npx crash; #1939).
 

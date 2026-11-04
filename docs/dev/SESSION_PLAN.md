@@ -163,7 +163,7 @@ After each checkpoint, write one line in the **Log** at the bottom. If the sessi
 | CP4 D1 | Quad9 port 443 | done, as three modes `doh` / `vpn` / `plain` (more than planned: the user wanted options) |
 | CP5 D2/D3/D4 | interface re-render, message, archive | D2 done (stdin instead of a temp file after a flake), D3 no code change, D4 done |
 | CP6 VM suite | full run, commits | done: 125/0/0 (Homebrew image), 112/0/1 (clean image); several test-side fixes on the way |
-| CP7 docs | README, CLAUDE.md, PLAN, report | README, changelog, PLAN, CHECKPOINT, NEXT_SESSION, report done; **CLAUDE.md text is only a draft** (`CLAUDE_MD_DRAFT.md`, needs the user) |
+| CP7 docs | README, CLAUDE.md, PLAN, report | README, changelog, PLAN, CHECKPOINT, NEXT_SESSION, report done; CLAUDE.md rewritten on 2026-11-05 |
 | CP8 GitNexus | re-index, compare to main | done (risk low, not partial) |
 | CP9 PR | ask first | **not done**: PR #1 already exists (old v0.16 title); retitle only with the user's OK |
 | CP10 optional | Privoxy, WireGuard, cask timeout, Mullvad, DoH | real Privoxy (T18) and real WireGuard (T19) done; installer Tor option marked planned; cask timeout skipped (headless-VM only); Mullvad and DoH image need the user |
@@ -173,3 +173,4 @@ Extras not in the plan: CI found green after the billing fix, `FOXHOLE_VM_BASE`,
 ## Log
 - 2026-11-04: plan written (read-only session: no code changed, nothing committed).
 - 2026-11-04 night: CP0-CP8 and most of CP10 done; open: CLAUDE.md text, PR #1 retitle, Mullvad/DoH tests (all need the user).
+- 2026-11-05: docs restructured, CLAUDE.md rewritten; PR #1 retitle left to the user (403).
