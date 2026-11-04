@@ -4,7 +4,7 @@
 - Branch `debug` pushed at `841c492` (v0.17.3). `main` is still v0.16.1. **Work only on `debug`.** No PR exists (checked via GitHub API); create one only when the user asks.
 - Uncommitted on purpose: `CLAUDE.md`, `AGENTS.md` (the user's own edits — don't touch). Untracked: `.DS_Store`, `.claude/`, `free-claude-code/`, three partial logs `vm-test-…_1706*/1708*/1709*.log` (runs cut off by SSH drops).
 - Work plan with checkboxes: `docs/testing/PLAN.md`. Changelogs: `docs/v 0.17/netlib_v0.17.2-changes.md` (second pass), `docs/v 0.17/netlib_v0.17.3.md`.
-- Last VM runs: 49 pass / 0 fail / 4 skip (`vm-test-2026-11-03_175310.log`, `_175751.log`). Skips = internet checks (VM has no egress).
+- Last VM runs: **64 pass / 0 fail / 0 skip** with `FOXHOLE_VM_NET=bridged` (`vm-test-2026-11-03_181300.log`, `_181523.log`). Without bridged mode the VM has no egress and 4 internet checks skip (49/0/4).
 
 ## What was done this session
 1. Housekeeping: confirmed B1 (`port = 53`) and the Rosetta guard were already committed (`77c92e6`); tested the guard with a throwaway script; moved the guard above the "Do not run as root" comment in the installer.
@@ -26,7 +26,7 @@
 - Tart 2.41.1 in `~/.local/tart`, symlink `~/.local/bin/tart`. `TART_HOME="/Volumes/Disc Samsung T7/vm - backups/macos_vm"` (SSD must be plugged in).
 - VMs: `foxhole-test` (work copy), `foxhole-clean` (untouched). Login `admin`/`admin`, `sudo -n` works. Host shell is zsh (no word-splitting; use functions, not `$V`), host `bash` on PATH is Intel-only → use `bash` via `arch -arm64` (scripts re-exec).
 - `bash tests/vm/run.sh --reset` = full test; `bash tests/vm/vm.sh up|push|ssh '…'|down|reset` = ad hoc.
-- VM has no direct internet (host Mullvad Lockdown likely blocks NAT from `bridge100`); DNS via the host gateway works.
+- Default NAT mode has no internet (host Mullvad Lockdown). **Use `FOXHOLE_VM_NET=bridged bash tests/vm/run.sh [--reset]`** (`--net-bridged=en0`, VM gets a LAN IP, `tart ip --resolver arp`). Stop the VM gracefully (`vm.sh down` / `run.sh` do `sync; shutdown -h now`) — `tart stop` alone lost the last file ops.
 
 ## Open questions for the user
 - Quad9 whitelist passes any port (plain DNS to 9.9.9.9 :53 leaks outside the VPN) → restrict to 443?
@@ -34,8 +34,7 @@
 - Old (≤0.17.2) installs: PF stays on after migration (no token); script prints `sudo pfctl -d`.
 
 ## Next (see PLAN.md)
-1. Step 2: VM egress (try `tart run --net-softnet`; host Mullvad may need Lockdown paused) → run the 4 skipped checks.
-2. `foxhole-doh` image with the Quad9 DoH profile → health checks [1], [3]–[6]; WireGuard tunnel test.
-3. `vmtest.sh` coverage: hosts blocklist, Privoxy autoswitch with real Privoxy, base installer.
-4. Make `run.sh --reset` wait for the VM to stop (one run after a reboot wrote no log).
+1. WireGuard tunnel test in the VM (`brew install wireguard-tools wireguard-go`, loopback-style config) → DNS through `utun+` with lock on; real `vpn_active` check.
+2. Privoxy auto-switch with real Privoxy in the VM (brew), installer areas in `vmtest.sh`.
+3. Real DoH profile image `foxhole-doh` (GUI approval; optional — T11 uses a Quad9 plain-DNS stand-in).
 5. Step 3: `FOXHOLE_ASSUME_YES`, CI, `BASE_SUM` lint, decide `debug_netlib/`, CLAUDE.md testing section → `tests/vm/run.sh`, refresh GitNexus (`node .gitnexus/run.cjs analyze --index-only`).

@@ -46,11 +46,14 @@ Don't touch the user's uncommitted `CLAUDE.md` / `AGENTS.md`.
 - [ ] Open question for the user: Quad9 whitelist passes **any port** (incl. plain DNS :53 to 9.9.9.9 outside the VPN); restrict to 443 (DoH)?
 - [ ] Open question: block rules only cover interfaces present at enable time; a USB/Thunderbolt NIC added later is not blocked until re-enable
 
-## Step 2 — P2 VM coverage (needs SSD + user)
-- [ ] VM egress (pause Mullvad Lockdown or `tart run --net-softnet`) → 4 skipped checks
-- [ ] `foxhole-doh` image with the Quad9 DoH profile → health checks [1], [3]–[6]
-- [ ] WireGuard tunnel in the VM
-- [ ] `vmtest.sh`: hosts blocklist, Privoxy auto-switch, base installer
+## Step 2 — P2 VM coverage
+- [x] VM egress: `FOXHOLE_VM_NET=bridged` (`--net-bridged=en0`, VM gets a LAN address; ARP resolver for `tart ip`). Default NAT stays blocked by host Mullvad Lockdown; `--net-softnet` needs the `softnet` binary + host sudo (not available non-interactively).
+  - 4 skipped internet checks now run: 8.8.8.8 blocked, Quad9 allowed, HTTPS ok, DNS works again after disable.
+- [x] T11 full stack: Quad9 plain-DNS resolver (stand-in for the DoH profile, which needs GUI approval) + hosts blocklist (77k entries) + lock → health check **10/10**; hosts update/idempotence/reset.
+- [x] `run.sh`/`vm.sh down`: graceful shutdown (`sync; shutdown -h now`) — abrupt `tart stop` lost the last file ops and left stale lock state for the next run. Two consecutive runs: 64/0/0 each.
+- [ ] Real DoH profile image `foxhole-doh` (needs GUI click in the VM: boot with graphics) — still only the plain-DNS stand-in
+- [ ] WireGuard tunnel in the VM (utun with IPv4, proves DNS passes through `utun+` with the lock on; also exercises proxy-toggle `vpn_active` for real)
+- [ ] `vmtest.sh`: Privoxy auto-switch with real Privoxy (brew), base installer dry areas
 
 ## Step 3 — P3 quality / merge prep
 - [ ] `FOXHOLE_ASSUME_YES=1` for `ask`
@@ -63,4 +66,4 @@ Don't touch the user's uncommitted `CLAUDE.md` / `AGENTS.md`.
 - 2026-11-03: plan written; Step 0 / 1.1 checked. Logs 170637/170811/170950 are runs cut off by a dropped SSH session (left untracked); 171053 is the good one.
 - 2026-11-03 evening: user unplugged the SSD; did the offline bug sweep (Step 1b). Details: `docs/v 0.17/netlib_v0.17.2-changes.md` → Second pass.
 - 2026-11-03 night: SSD back. Step 1.2–1.4 done ("big guy"): VM research → helper/token design → 49/0/4 + reboot test. New `tests/vm/vm.sh` for ad-hoc VM work.
-- Next: Step 2 (VM egress, DoH image), open questions in Step 1b.
+- 2026-11-03 night: Step 2 egress + T11 done (64/0/0 twice). Next: WireGuard/Privoxy tests, then Step 3.

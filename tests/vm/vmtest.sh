@@ -124,6 +124,35 @@ echo "== T9 reset_net_hardening re-run on clean state"
 reset_net_hardening >/dev/null 2>&1; chk "reset exits 0" '[[ $? -eq 0 ]]'
 chk "PF off after reset" '! pf_on'
 
+echo "== T11 full stack with internet: Quad9 resolver + hosts blocklist + lock (needs egress)"
+if [[ "$NET_OK" != 1 ]]; then
+    skip "T11 full stack"
+else
+    # The real design uses the Quad9 DoH profile, which needs a GUI approval.
+    # Stand-in: plain-DNS resolver 9.9.9.9 (whitelisted by the lock), so the health check can pass.
+    SVC=$(networksetup -listallnetworkservices | tail -n +2 | grep -v '^\*' | head -1)
+    sudo networksetup -setdnsservers "$SVC" 9.9.9.9 149.112.112.112
+    sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder 2>/dev/null
+    update_hosts >/tmp/hosts.out 2>&1
+    chk "hosts blocklist installed (>1000 entries)" '[[ "$(grep -c "^0\.0\.0\.0" /etc/hosts)" -gt 1000 ]]'
+    chk "hosts: marker exactly once" '[[ "$(grep -cF "# ===== StevenBlack Blocklist =====" /etc/hosts)" == 1 ]]'
+    chk "hosts: localhost entries kept" 'grep -q "^127.0.0.1[[:space:]]*localhost" /etc/hosts'
+    chk "hosts: a listed ad domain resolves to 0.0.0.0" '[[ "$(dscacheutil -q host -a name doubleclick.net 2>/dev/null | awk "/ip_address/{print \$2; exit}")" == 0.0.0.0 ]]'
+    prepare_pf_dns_lock_anchor >/dev/null 2>&1; enable_pf_dns_lock >/dev/null 2>&1
+    chk "resolver works through the lock" 'dig +time=4 +tries=1 +short example.com | grep -q "[0-9]"'
+    chk "plain DNS to 8.8.8.8 blocked, resolver 9.9.9.9 still fine" '! dig +time=3 +tries=1 +short example.com @8.8.8.8 | grep -q "[0-9]" && dig +time=4 +tries=1 +short example.com @9.9.9.9 | grep -q "[0-9]"'
+    OUT=$(verify_dns_stack 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+    echo "$OUT" | grep -E '^\[|Results'
+    chk "health check: all 10 pass" 'echo "$OUT" | grep -q "Results: 10/10 passed, 0 failed"'
+    update_hosts >/tmp/hosts2.out 2>&1
+    chk "hosts: second update keeps one marker" '[[ "$(grep -cF "# ===== StevenBlack Blocklist =====" /etc/hosts)" == 1 ]]'
+    reset_net_hardening >/dev/null 2>&1
+    sudo networksetup -setdnsservers "$SVC" Empty
+    chk "reset: blocklist and lock gone" '! grep -qF "StevenBlack Blocklist" /etc/hosts && ! sudo bash $HELPER status'
+    chk "reset: /etc/hosts still has localhost" 'grep -q "^127.0.0.1[[:space:]]*localhost" /etc/hosts'
+    chk "reset: PF off" '! pf_on'
+fi
+
 echo "== T10 vpn_daily.sh menu from another cwd (driven by expect: ask() needs a tty)"
 cat > /tmp/vd.exp <<'EXP'
 set timeout 30
