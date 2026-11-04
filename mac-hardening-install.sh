@@ -2,7 +2,7 @@
 #
 # Foxhole-macos — macOS Advanced Security Hardening Script
 #
-# Version: 0.15 (2026)
+# Version: 0.17.3 (2026-11-03)
 # Author:  Gr3y-foX
 # Based on: drduh/macOS-Security-and-Privacy-Guide (MIT)
 # License: GNU GPL v3 — see LICENSE for details
@@ -15,11 +15,27 @@
 # Includes (via Homebrew / casks where applicable):
 #   - Objective-See tools (LuLu, BlockBlock, KnockKnock, Do Not Disturb)
 #   - lynis, pipx + pip-audit, brew-vulns, Mergen (optional)
-#   - dnscrypt-proxy, StevenBlack hosts blocklist (via netlib / profiles)
+#   - PF DNS leak lock, StevenBlack hosts blocklist, Privoxy (via netlib / profiles)
+#
+# Notes for v0.17.3 (found by running the installer in a VM):
+#   - OverSight: pinned GitHub release + SHA-1 (the objective-see.org URL was a
+#     404; the archive's app is "OverSight Installer.app", with a space)
+#   - Mergen: asset resolved via the GitHub API, SHA-256 checked against SHA256SUMS.txt
+#   - brew vulns is built into Homebrew (the homebrew/brew-vulns tap is archived)
+#   - Gatekeeper: spctl --status exits 1 when disabled; that case is now handled
+#   - firewall step asks to be skipped when Remote Login (SSH) is on: stealth +
+#     blocked signed apps drop incoming SSH, even open sessions
+#   - FOXHOLE_ASSUME_YES=1 answers every ask() with y (unattended runs)
 #
 # Notes for v0.15:
 #   - Stricter error handling and safer defaults
 #   - Fixed brew service handling and checks
+
+# Re-exec natively if started from a Rosetta (x86_64) shell, e.g. an
+# Intel-only bash in /usr/local/bin; arch and brew-prefix checks need arm64.
+if [[ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" == "1" ]]; then
+    exec arch -arm64 /bin/bash "$0" "$@"
+fi
 
 # Do not run as root
 if [[ "$EUID" -eq 0 ]]; then
@@ -50,11 +66,18 @@ die() { err "$1"; exit 1; }
 
 ask() {
     local PROMPT="$1" VAR="$2"
+    # Opt-in automation (tests, unattended runs): FOXHOLE_ASSUME_YES=1 answers every prompt "y"
+    if [[ "${FOXHOLE_ASSUME_YES:-0}" == "1" ]]; then
+        info "FOXHOLE_ASSUME_YES=1 — answering yes: $PROMPT"
+        printf -v "$VAR" '%s' 'y'
+        return 0
+    fi
     if [[ -t 0 ]]; then
+        # shellcheck disable=SC2229  # reads into the variable *named* by $VAR
         read -rp "    ${PROMPT} (y/N): " "$VAR"
     else
         warn "Non-interactive — skipping: $PROMPT"
-        eval "$VAR=N"
+        printf -v "$VAR" '%s' 'N'
     fi
 }
 
@@ -189,6 +212,17 @@ configure_firewall() {
     echo "  ╚══════════════════════════════════════════╝"
     echo ""
     local FW="/usr/libexec/ApplicationFirewall/socketfilterfw"
+    # Stealth mode + "allow signed" off make the application firewall drop incoming
+    # connections to sshd too, even established ones (verified in a VM).
+    if nc -z -G 1 127.0.0.1 22 >/dev/null 2>&1; then
+        warn "Remote Login (SSH, port 22) is ON on this Mac."
+        warn "The firewall settings below will cut incoming SSH, including open sessions."
+        ask "Skip the firewall step to keep SSH reachable?" CONFIRM
+        if [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]]; then
+            log "Skipping firewall."
+            return 0
+        fi
+    fi
     log "Checking firewall state..."
     local STATE
     STATE=$(sudo "$FW" --getglobalstate 2>/dev/null)
@@ -227,23 +261,19 @@ SECURITY_CASKS=(
 # List of formula-checking tools
 SECURITY_FORMULAS=(
   "lynis"
-  "dnscrypt-proxy"
   "privoxy"
 )
 
 # ──────────────────────────────────────────
 # OVERSIGHT — install / launch / login item
 # ──────────────────────────────────────────
-OVERSIGHT_URL="https://objective-see.org/products/downloads.html"
+OVERSIGHT_URL="https://objective-see.org/products/oversight.html"
 OVERSIGHT_APP="/Applications/OverSight.app"
-OVERSIGHT_INSTALLER_ZIP="/tmp/OverSight.zip"
-
-# ──────────────────────────────────────────
-# OVERSIGHT — install / launch / login item
-# ──────────────────────────────────────────
-OVERSIGHT_URL="https://objective-see.org/products/downloads.html"
-OVERSIGHT_APP="/Applications/OverSight.app"
-OVERSIGHT_INSTALLER_ZIP="/tmp/OverSight.zip"
+# Pinned: the SHA-1 below belongs to exactly this release (checked against the
+# GitHub release asset). objective-see.org/downloads/OverSight.zip is a 404.
+OVERSIGHT_VERSION="2.4.0"
+OVERSIGHT_ZIP_URL="https://github.com/objective-see/OverSight/releases/download/v${OVERSIGHT_VERSION}/OverSight_${OVERSIGHT_VERSION}.zip"
+OVERSIGHT_ZIP_SHA1="EBBD36EE98A821A677AE32F16A7097ACC64DE9F9"
 
 install_oversight() {
     echo ""
@@ -273,57 +303,41 @@ install_oversight() {
     fi
   fi
 
-  # ── Download ──
-  log "Downloading OverSight..."
-  info "Note: OverSight has no Homebrew cask — downloading from objective-see.org"
+  # ── Download (pinned release, SHA-1 verified, private temp dir) ──
+  log "Downloading OverSight ${OVERSIGHT_VERSION}..."
+  info "OverSight has no signed pkg — pinned GitHub release asset, SHA-1 checked"
+  info "URL: ${OVERSIGHT_ZIP_URL}"
 
-  # Get direct zip link (parse downloads page)
-  local DOWNLOAD_URL
-  DOWNLOAD_URL=$(curl -fsSL "$OVERSIGHT_URL" 2>/dev/null \
-    | grep -oE 'https://[^"]+OverSight[^"]+\.zip' \
-    | head -1)
+  local WORK
+  WORK=$(mktemp -d /tmp/oversight.XXXXXX) || { err "mktemp failed."; return 1; }
+  local ZIP="${WORK}/OverSight.zip"
 
-  if [[ -z "$DOWNLOAD_URL" ]]; then
-    warn "Auto-detect failed — using hardcoded fallback URL."
-    DOWNLOAD_URL="https://objective-see.org/downloads/OverSight.zip"
-  fi
-
-  info "URL: ${DOWNLOAD_URL}"
-
-  if ! curl -fsSL "$DOWNLOAD_URL" -o "$OVERSIGHT_INSTALLER_ZIP"; then
+  if ! curl -fsSL "$OVERSIGHT_ZIP_URL" -o "$ZIP"; then
     err "Download failed. Visit manually: ${OVERSIGHT_URL}"
-    return 1
+    rm -rf "$WORK"; return 1
   fi
 
-  # SHA-1 check (current version 2.4.0)
-  local EXPECTED_SHA1="EBBD36EE98A821A677AE32F16A7097ACC64DE9F9"
   local ACTUAL_SHA1
-  ACTUAL_SHA1=$(shasum -a 1 "$OVERSIGHT_INSTALLER_ZIP" | awk '{print toupper($1)}')
-  info "SHA-1 expected: ${EXPECTED_SHA1}"
+  ACTUAL_SHA1=$(shasum -a 1 "$ZIP" | awk '{print toupper($1)}')
+  info "SHA-1 expected: ${OVERSIGHT_ZIP_SHA1}"
   info "SHA-1 actual:   ${ACTUAL_SHA1}"
-
-  if [[ "$ACTUAL_SHA1" != "$EXPECTED_SHA1" ]]; then
+  if [[ "$ACTUAL_SHA1" != "$OVERSIGHT_ZIP_SHA1" ]]; then
     err "SHA-1 mismatch! Archive may be corrupted or tampered."
     err "Aborting OverSight install."
-    rm -f "$OVERSIGHT_INSTALLER_ZIP"
-    return 1
+    rm -rf "$WORK"; return 1
   fi
   log "SHA-1 verified ✓"
 
   # ── Extract and run installer ──
-  local UNZIP_DIR="/tmp/OverSight_install"
-  rm -rf "$UNZIP_DIR"
-  mkdir -p "$UNZIP_DIR"
+  unzip -q "$ZIP" -d "${WORK}/x" \
+    || { err "Failed to unzip OverSight archive."; rm -rf "$WORK"; return 1; }
 
-  unzip -q "$OVERSIGHT_INSTALLER_ZIP" -d "$UNZIP_DIR" \
-    || { err "Failed to unzip OverSight archive."; return 1; }
-
+  # The app inside the archive is "OverSight Installer.app" (with a space)
   local INSTALLER_APP
-  INSTALLER_APP=$(find "$UNZIP_DIR" -name "OverSight_Installer.app" | head -1)
-
+  INSTALLER_APP=$(find "${WORK}/x" -maxdepth 2 -name "OverSight*Installer.app" | head -1)
   if [[ -z "$INSTALLER_APP" ]]; then
-    err "OverSight_Installer.app not found in archive."
-    return 1
+    err "OverSight installer app not found in archive."
+    rm -rf "$WORK"; return 1
   fi
 
   warn "Opening OverSight installer — follow on-screen prompts."
@@ -345,8 +359,7 @@ install_oversight() {
   fi
 
   # Cleanup
-  rm -f "$OVERSIGHT_INSTALLER_ZIP"
-  rm -rf "$UNZIP_DIR"
+  rm -rf "$WORK"
 
   # ── Check and run ──
   _oversight_ensure_running
@@ -715,24 +728,16 @@ install_security_tools() {
     fi
     pipx ensurepath > /dev/null 2>&1 || true
 
-    # brew-vulns
-    log "Checking brew-vulns..."
-    if ! brew tap | grep -q "homebrew/brew-vulns"; then
-        brew tap homebrew/brew-vulns \
-            && log "brew-vulns tap added." \
-            || err "Failed to tap homebrew/brew-vulns!"
+    # brew-vulns: now a built-in Homebrew command (the homebrew/brew-vulns tap is archived)
+    log "Checking brew vulns..."
+    if brew vulns --help &>/dev/null; then
+        log "brew vulns is available (built into Homebrew)."
     else
-        warn "brew-vulns tap already added."
-    fi
-    if brew vulns --version &>/dev/null 2>&1; then
-        warn "brew-vulns already installed."
-        ask "Update?" CONFIRM
-        [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]] \
-            && brew upgrade homebrew/brew-vulns/brew-vulns || true
-    else
-        brew install homebrew/brew-vulns/brew-vulns \
-            && log "brew-vulns installed." \
-            || err "Failed to install brew-vulns!"
+        warn "brew vulns not available — updating Homebrew..."
+        brew update >/dev/null 2>&1 || true
+        brew vulns --help &>/dev/null \
+            && log "brew vulns is available." \
+            || warn "brew vulns still missing — upgrade Homebrew: brew update && brew upgrade"
     fi
 
     # Mergen
@@ -746,23 +751,63 @@ install_security_tools() {
         ask "Install Mergen (GitHub download)?" CONFIRM
     fi
     if [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]]; then
-        local MERGEN_DMG="/tmp/Mergen.dmg"
-        if curl -fsSL --progress-bar \
-            -o "$MERGEN_DMG" \
-            "https://github.com/sametsazak/mergen/releases/latest/download/Mergen.dmg"
-        then
-            hdiutil attach "$MERGEN_DMG" -quiet
-            cp -R "/Volumes/Mergen/Mergen.app" /Applications/ 2>/dev/null \
-                && log "Mergen installed." \
-                || err "Copy failed — mount manually: open $MERGEN_DMG"
-            hdiutil detach "/Volumes/Mergen" -quiet 2>/dev/null || true
-            rm -f "$MERGEN_DMG"
-        else
-            err "Download failed: https://github.com/sametsazak/mergen/releases"
-        fi
+        _install_mergen
     fi
 }
 
+
+# Mergen ships Mergen-<version>.dmg plus SHA256SUMS.txt; resolve both via the API
+_install_mergen() {
+    local API="https://api.github.com/repos/sametsazak/mergen/releases/latest"
+    local REL DMG_URL SUMS_URL
+    REL=$(curl -fsSL --max-time 20 "$API" 2>/dev/null) \
+        || { err "Cannot query ${API}"; return 1; }
+    DMG_URL=$(printf '%s' "$REL" \
+        | grep -oE '"browser_download_url": *"[^"]+\.dmg"' | head -1 \
+        | sed -E 's/.*"(https[^"]+)"$/\1/')
+    SUMS_URL=$(printf '%s' "$REL" \
+        | grep -oE '"browser_download_url": *"[^"]*SHA256SUMS[^"]*"' | head -1 \
+        | sed -E 's/.*"(https[^"]+)"$/\1/')
+    [[ -n "$DMG_URL" ]] || { err "No .dmg asset in the latest Mergen release."; return 1; }
+    info "URL: ${DMG_URL}"
+
+    local WORK
+    WORK=$(mktemp -d /tmp/mergen.XXXXXX) || { err "mktemp failed."; return 1; }
+    local DMG
+    DMG="${WORK}/$(basename "$DMG_URL")"
+    curl -fsSL --progress-bar -o "$DMG" "$DMG_URL" \
+        || { err "Download failed: ${DMG_URL}"; rm -rf "$WORK"; return 1; }
+
+    if [[ -n "$SUMS_URL" ]] && curl -fsSL --max-time 20 -o "${WORK}/SHA256SUMS.txt" "$SUMS_URL"; then
+        local EXPECTED ACTUAL
+        EXPECTED=$(awk -v f="$(basename "$DMG")" '{n=$2; sub(/^\*/,"",n)} n==f {print $1}' "${WORK}/SHA256SUMS.txt")
+        ACTUAL=$(shasum -a 256 "$DMG" | awk '{print $1}')
+        if [[ -z "$EXPECTED" ]]; then
+            warn "No checksum for $(basename "$DMG") in SHA256SUMS.txt — continuing unverified."
+        elif [[ "$EXPECTED" != "$ACTUAL" ]]; then
+            err "SHA-256 mismatch for $(basename "$DMG")! Aborting Mergen install."
+            rm -rf "$WORK"; return 1
+        else
+            log "SHA-256 verified ✓"
+        fi
+    else
+        warn "No SHA256SUMS.txt in the release — installing unverified."
+    fi
+
+    local MOUNT
+    MOUNT=$(hdiutil attach -nobrowse -readonly "$DMG" 2>/dev/null \
+        | awk -F'\t' '/\/Volumes\//{print $NF}' | tail -1)
+    [[ -n "$MOUNT" ]] || { err "Could not mount ${DMG}"; rm -rf "$WORK"; return 1; }
+    local APP
+    APP=$(find "$MOUNT" -maxdepth 2 -name "*.app" | head -1)
+    if [[ -n "$APP" ]] && cp -R "$APP" /Applications/ 2>/dev/null; then
+        log "Mergen installed."
+    else
+        err "Copy failed — mount manually: open ${DMG}"
+    fi
+    hdiutil detach "$MOUNT" -quiet 2>/dev/null || true
+    rm -rf "$WORK"
+}
 
 # ──────────────────────────────────────────
 # COMPILER HARDENING (Lynis HRDN-7222)
@@ -897,7 +942,9 @@ check_gatekeeper_filevault() {
 
   # Gatekeeper
   local GK_STATUS
-  if GK_STATUS=$(spctl --status 2>/dev/null); then
+  # spctl --status exits 1 when assessments are disabled, so do not test its exit code
+  GK_STATUS=$(spctl --status 2>&1 || true)
+  if [[ "$GK_STATUS" == *assessments* ]]; then
     info "Gatekeeper: $GK_STATUS"
     if echo "$GK_STATUS" | grep -qi "disabled"; then
       warn "Gatekeeper is DISABLED."
@@ -941,7 +988,7 @@ echo "  ░██         ░███████  ░██    ░██ ░�
 echo ""  
 echo "  ╔══════════════════════════════════════════╗"
 echo "  ║     macOS Security Hardening Script      ║"
-echo "  ║            v0.16  ·  by Gr3y-foX         ║"
+echo "  ║          v0.17.3  ·  by Gr3y-foX         ║"
 echo "  ║       ARM/M-chip  |  strict mode         ║"
 echo "  ╠══════════════════════════════════════════╣"
 echo "  ║  status: [ARMED]  |  mode: interactive   ║"
@@ -972,8 +1019,8 @@ ask "Run network module now?" CONFIRM_NET
 if [[ "$CONFIRM_NET" != "y" && "$CONFIRM_NET" != "Y" ]]; then
   log "Network profiles can be run later from directory: $SCRIPT_DIR"
   echo "  - mac-hardening-netlib.sh"
-  echo "  - profile-vpn-daily.sh"
-  echo "  - profile-paranoid-tor.sh"
+  echo "  - vpn_daily.sh"
+  echo "  - profile-paranoid-tor.sh (planned, not available yet)"
   echo ""
   log "Done. Stay paranoid. 🔒"
   exit 0
@@ -982,8 +1029,8 @@ fi
 echo ""
 echo "Select network scenario:"
 echo "  [1] VPN Daily profile (ClearVPN / OpenVPN, without complex rules)"
-echo "  [2] Paranoid Tor profile (maximum anonymity, complex scheme)"
-echo "  [3] Open mac-hardening-netlib menu (manual blocks dnscrypt/PF/Privoxy)"
+echo "  [2] Paranoid Tor profile (planned, not available yet)"
+echo "  [3] Open mac-hardening-netlib menu (manual blocks PF/hosts/Privoxy)"
 echo "  [4] Do nothing now"
 echo ""
 read -rp "Choice (1-4): " NET_CHOICE
@@ -995,8 +1042,8 @@ case "$NET_CHOICE" in
     bash "$SCRIPT_DIR/vpn_daily.sh"
     ;;
   2)
-    log "Running Paranoid Tor profile..."
-    bash "$SCRIPT_DIR/profile-paranoid-tor.sh"
+    warn "The Paranoid Tor profile is still a stub (planned). Nothing was changed."
+    info "Use [1] VPN Daily or [3] the netlib menu for now."
     ;;
   3)
     log "Running mac-hardening-netlib menu..."
