@@ -9,13 +9,13 @@ Long session on 2026-11-03 took `debug` from v0.17.2 to v0.17.3:
 
 The goal of the next session: close the unverified work, get the user's 4 design decisions, finish merge prep, and open the PR `debug` → `main` **only when the user asks**.
 
-## Status update — 2026-11-04 (overrides the "State" section below where they differ)
-- Step 1.2 done: fresh-VM suite **100 passed / 0 failed / 0 skipped** incl. T16 (`vm-test-2026-11-03_233425.log`). Pushed.
-- Step 1.3 done: push works with `arch -arm64 /usr/bin/git push -u origin debug`.
-- Step 1.4 **blocked**: every GitHub Actions run fails with "account is locked due to a billing issue" before any step starts. Needs the account owner to fix billing, then re-run `lint` for `debug`.
-- Step 1.5 open: remote still points at `macos-sec-harder-26`; GitHub says the repo moved to `foxhole-macos`.
-- Step 2 (decisions D1–D4) still open: waiting for the user.
-- 2026-11-04 session: `.gitnexusignore` (`free-claude-code/`) added; `AGENTS.md` is now a symlink to `CLAUDE.md`; CLAUDE.md now says to expect `UNKNOWN` for bash and states the "warn before editing" rule explicitly.
+## Status update — 2026-11-04 night (overrides everything below where they differ)
+Read `CHECKPOINT.md` first, then `SESSION_PLAN.md`. Summary:
+- Pushed over SSH (`origin` = `git@github-foxhole:Gr3y-foX/foxhole-macos.git`; run `ssh`/`git push` outside the sandbox).
+- D1 done: `FOXHOLE_DNS_MODE` = `doh` (default, Quad9 tcp 443 only) / `vpn` / `plain`. D2 done: boot helper re-renders interfaces (rules via `pfctl -f -`, no temp file). D3: keep the `sudo pfctl -d` message. D4 done: `debug_netlib/` is in `docs/archive/`.
+- VM suite: 120/0/0 on the Homebrew image (`FOXHOLE_VM_BASE=foxhole-brew`, includes T18 real Privoxy), 112/0/1 on the clean image. Offline 17/17.
+- Installer option [2] (Tor profile) is now marked "planned" and does not run the stub.
+- Still open: CP7 (review `docs/testing/CLAUDE_MD_DRAFT.md`, apply to CLAUDE.md if the user agrees; stale GitNexus stats and `.claude/skills` table in CLAUDE.md), CP9 (PR only if asked), CI (account billing), real Mullvad / WireGuard / DoH image (need the user; the Mullvad account number must never be stored).
 
 ## State at the end of the session (checked read-only)
 - **Branch:** `debug` is in sync with `origin/debug` at `531695d`. There are 25 commits ahead of `main`; `main` is still at v0.16.1.

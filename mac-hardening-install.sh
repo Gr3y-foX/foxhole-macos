@@ -1020,7 +1020,7 @@ if [[ "$CONFIRM_NET" != "y" && "$CONFIRM_NET" != "Y" ]]; then
   log "Network profiles can be run later from directory: $SCRIPT_DIR"
   echo "  - mac-hardening-netlib.sh"
   echo "  - vpn_daily.sh"
-  echo "  - profile-paranoid-tor.sh"
+  echo "  - profile-paranoid-tor.sh (planned, not available yet)"
   echo ""
   log "Done. Stay paranoid. 🔒"
   exit 0
@@ -1029,7 +1029,7 @@ fi
 echo ""
 echo "Select network scenario:"
 echo "  [1] VPN Daily profile (ClearVPN / OpenVPN, without complex rules)"
-echo "  [2] Paranoid Tor profile (maximum anonymity, complex scheme)"
+echo "  [2] Paranoid Tor profile (planned, not available yet)"
 echo "  [3] Open mac-hardening-netlib menu (manual blocks PF/hosts/Privoxy)"
 echo "  [4] Do nothing now"
 echo ""
@@ -1042,8 +1042,8 @@ case "$NET_CHOICE" in
     bash "$SCRIPT_DIR/vpn_daily.sh"
     ;;
   2)
-    log "Running Paranoid Tor profile..."
-    bash "$SCRIPT_DIR/profile-paranoid-tor.sh"
+    warn "The Paranoid Tor profile is still a stub (planned). Nothing was changed."
+    info "Use [1] VPN Daily or [3] the netlib menu for now."
     ;;
   3)
     log "Running mac-hardening-netlib menu..."

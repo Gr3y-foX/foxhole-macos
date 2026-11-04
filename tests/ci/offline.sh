@@ -59,6 +59,7 @@ chk "no eval in the netlib" '! grep -nE "(^|[^a-z_])eval " "$REPO/mac-hardening-
 
 echo "== no stale design"
 chk "no dnscrypt-proxy formula in the installer" '! grep -q "\"dnscrypt-proxy\"" "$REPO/mac-hardening-install.sh"'
+chk "installer does not run the Tor profile stub" '! grep -q "bash \"\$SCRIPT_DIR/profile-paranoid-tor.sh\"" "$REPO/mac-hardening-install.sh"'
 chk "no launchctl load/unload left in the netlib" '! grep -qE "launchctl (un)?load" "$REPO/mac-hardening-netlib.sh"'
 chk "pf.conf is never written by enable (only the legacy cleanup touches it)" \
     '[[ "$(grep -c "tee -a \"\$PF_CONF\"\|tee -a /etc/pf.conf" "$REPO/mac-hardening-netlib.sh")" == 0 ]]'
