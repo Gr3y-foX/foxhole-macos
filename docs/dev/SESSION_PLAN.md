@@ -14,7 +14,7 @@ After each checkpoint, write one line in the **Log** at the bottom. If the sessi
 
 ## Starting state (read-only, 2026-11-04)
 - **Branch:** `debug` at `a1c62a4`. The local `origin/debug` ref is `c3ffa61`, so **1 commit is not pushed** (the GitNexus ignore / AGENTS symlink / checkpoint commit). This ref may be stale: confirm with `git ls-remote`.
-- **Commits ahead of `main`:** 32. `main` is still v0.16.1. Netlib header says v0.17.3. Changelog: `docs/v 0.17/netlib_v0.17.3.md`.
+- **Commits ahead of `main`:** 32. `main` is still v0.16.1. Netlib header says v0.17.3. Changelog: `docs/changelog/v0.17.3.md`.
 - **Tests:** last fresh-VM suite was 100/0/0, including T16 (`vm-test-2026-11-03_233425.log`). `tests/ci/offline.sh` passed 13/13 locally.
 - **CI:** blocked by the GitHub billing lock. This is not a code problem.
 - **Remote:** `origin` still points at `macos-sec-harder-26`, but GitHub says the repo moved to `foxhole-macos`.
@@ -96,7 +96,7 @@ After each checkpoint, write one line in the **Log** at the bottom. If the sessi
 
 ## CP6: Full VM suite (only if CP4 or CP5 changed code)
 - [ ] **Run:** `FOXHOLE_VM_NET=bridged bash tests/vm/run.sh --reset`
-- [ ] **Check:** 0 failed / 0 skipped. The total is about 100 or more, plus the new tests. The log is copied into `docs/testing/`.
+- [ ] **Check:** 0 failed / 0 skipped. The total is about 100 or more, plus the new tests. The log is copied into `docs/testing/logs/`.
 - **Stop if:** something fails twice for the same reason after one fix attempt. Then report it with the log excerpt.
 - [ ] **Commit:** one commit per decision. Examples:
   - `fix(netlib): restrict Quad9 whitelist to DoH port 443`
@@ -113,7 +113,7 @@ After each checkpoint, write one line in the **Log** at the bottom. If the sessi
 - [ ] **CLAUDE.md:** ask about the stale GitNexus stats (7373 symbols) and the `.claude/skills` table, which points at untracked files.
 - [ ] **PLAN.md:** tick the done or obsolete items and add a summary line.
 - [ ] **CHECKPOINT.md:** rewrite it so it's no longer stale. Its "Next" list still says push/T16, and it still says "nothing pushed".
-- [ ] **Test report:** write a consolidated `docs/testing/vm-test-report-2026-11-04.md`. Ask before pruning old logs.
+- [ ] **Test report:** write a consolidated `docs/testing/reports/vm-test-report-2026-11-04.md`. Ask before pruning old logs.
 - [ ] **Check:** `grep` for stale claims: `rollback.sh`, `pf.conf` edit, `dnscrypt`, `utun+`.
 - [ ] **Commit:** `docs: …`, then push.
 - **Continue:** CP8.

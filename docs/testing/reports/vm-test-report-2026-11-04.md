@@ -1,6 +1,6 @@
 # VM test report — 2026-11-04 (v0.17.3 + DNS modes)
 
-Final fresh-VM runs (`FOXHOLE_VM_NET=bridged`, `tests/vm/run.sh --reset`): **125 passed / 0 failed / 0 skipped** on the Homebrew image (`FOXHOLE_VM_BASE=foxhole-brew`, `vm-test-2026-11-04_234847.log`); **112 / 0 / 1 skipped** on the clean image (`vm-test-2026-11-04_233206.log`, T18 needs Homebrew).
+Final fresh-VM runs (`FOXHOLE_VM_NET=bridged`, `tests/vm/run.sh --reset`): **125 passed / 0 failed / 0 skipped** on the Homebrew image (`FOXHOLE_VM_BASE=foxhole-brew`, `../logs/vm-test-2026-11-04_234847.log`); **112 / 0 / 1 skipped** on the clean image (`../logs/vm-test-2026-11-04_233206.log`, T18 needs Homebrew).
 Offline: `tests/ci/offline.sh` 16/16. Lint: `bash -n` and `shellcheck -S warning` clean.
 
 | Area | Result |

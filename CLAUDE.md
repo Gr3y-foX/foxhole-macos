@@ -16,7 +16,7 @@ These scripts change **live system state** (firewall, `/etc/pf.conf`, `/etc/host
 | `mac-hardening-netlib.sh` | Network library (current v0.17.2). Source it from profiles, or run directly for its own menu. Holds PF anchor, hosts blocklist, Privoxy autoswitch, `verify_dns_stack`, `reset_net_hardening`, backups. |
 | `vpn_daily.sh` | "VPN Daily" profile: sources the netlib (path resolved from the script), menu for the PF DNS lock, health check and reset. |
 | `profile-paranoid-tor.sh` | Stub (header only). Planned Tor/PF/Privoxy profile. |
-| `docs/archive/debug_netlib/`, `debug/` | Work-in-progress copies, audit reports, handoff notes, draw.io diagrams. **Not shipped**; `docs/archive/debug_netlib/handoff.md` and `docs/v 0.17/` are the fix lists/changelog notes for the current release. |
+| `docs/archive/debug_netlib/`, `debug/` | Work-in-progress copies, audit reports, handoff notes, draw.io diagrams. **Not shipped**; `docs/archive/debug_netlib/handoff.md` and `docs/changelog/` are the fix lists/changelog notes for the current release. |
 | `free-claude-code/` | Unrelated, separately-cloned Python project (own CLAUDE.md, untracked). Ignore it for foxhole work. |
 
 Branches: `main` (release), `debug` (current work). Remote `origin` is `Gr3y-foX/macos-sec-harder-26` (the GitHub repo is also known as `foxhole-macos`).

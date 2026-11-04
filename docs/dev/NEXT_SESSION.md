@@ -15,19 +15,19 @@ Read `CHECKPOINT.md` first, then `SESSION_PLAN.md`. Summary:
 - D1 done: `FOXHOLE_DNS_MODE` = `doh` (default, Quad9 tcp 443 only) / `vpn` / `plain`. D2 done: boot helper re-renders interfaces (rules via `pfctl -f -`, no temp file). D3: keep the `sudo pfctl -d` message. D4 done: `debug_netlib/` is in `docs/archive/`.
 - VM suite: 125/0/0 on the Homebrew image (`FOXHOLE_VM_BASE=foxhole-brew`, includes T18 real Privoxy and T19 real WireGuard), 112/0/1 on the clean image. Offline 17/17.
 - Installer option [2] (Tor profile) is now marked "planned" and does not run the stub.
-- Still open: CP7 (review `docs/testing/CLAUDE_MD_DRAFT.md`, apply to CLAUDE.md if the user agrees; stale GitNexus stats and `.claude/skills` table in CLAUDE.md), CP9 (PR only if asked), CI (account billing), real Mullvad / DoH image (need the user; the Mullvad account number must never be stored).
+- Still open: CP7 (review `docs/dev/CLAUDE_MD_DRAFT.md`, apply to CLAUDE.md if the user agrees; stale GitNexus stats and `.claude/skills` table in CLAUDE.md), CP9 (PR only if asked), CI (account billing), real Mullvad / DoH image (need the user; the Mullvad account number must never be stored).
 
 ## State at the end of the session (checked read-only)
 - **Branch:** `debug` is in sync with `origin/debug` at `531695d`. There are 25 commits ahead of `main`; `main` is still at v0.16.1.
 - **Working tree:** only the user's own `CLAUDE.md` / `AGENTS.md` changes, which are a GitNexus section refresh. Don't touch them. Untracked: `.DS_Store`, `.claude/`, `free-claude-code/`.
-- **Last green VM run:** 93 passed / 0 failed / 0 skipped (`docs/testing/vm-test-2026-11-03_193350.log`, run with `FOXHOLE_VM_NET=bridged`).
+- **Last green VM run:** 93 passed / 0 failed / 0 skipped (`docs/testing/logs/vm-test-2026-11-03_193350.log`, run with `FOXHOLE_VM_NET=bridged`).
 - **Unverified commit `f59538b`:**
   - `create_net_backup` now writes `restore.sh` via `_write_restore_script` in `mac-hardening-netlib.sh`. The old message pointed at a `rollback.sh` that doesn't exist.
   - T16 in `tests/vm/vmtest.sh` covers it, but **has never run**.
 - **CI:** `.github/workflows/lint.yml` and `tests/ci/offline.sh` exist (offline tests pass 13/13 locally). The workflow has **never been seen running on GitHub**.
 - **Pushing:** the Intel Homebrew `/usr/local/bin/git` (Rosetta) hangs on github.com. `arch -arm64 /usr/bin/git push -u origin debug` works.
 - **Remote:** GitHub says the repo moved to `https://github.com/Gr3y-foX/foxhole-macos.git`, but the remote still points at `macos-sec-harder-26`.
-- **Stale plan items:** `docs/testing/PLAN.md` still has two open items that are already done or obsolete:
+- **Stale plan items:** `docs/dev/PLAN.md` still has two open items that are already done or obsolete:
   - "run.sh --reset produced no log": fixed by the graceful shutdown in `e240e12`.
   - Step 1b "VM: Privoxy menu [3]": T13 covers the toggle; only the real Privoxy binary is still open.
 - **Test order:** `vmtest.sh` sections run in this order: T0–T9, T11, T12, T14, T13, T15, T16, then T10 last (vpn_daily via expect).
@@ -49,13 +49,13 @@ Read `CHECKPOINT.md` first, then `SESSION_PLAN.md`. Summary:
 | D3 | Old (≤0.17.2) installs keep PF on after migration (no token) | Keep the current message (`sudo pfctl -d`); don't auto-disable | `_pf_legacy_cleanup` |
 | D4 | `debug_netlib/` (7 tracked files, incl. old `netlib-simple.sh`) | Move to `docs/archive/` or delete before the merge | repo tree, README |
 
-For each change: `bash -n`, `shellcheck -S warning`, a new or adjusted VM test, the full suite, a changelog note in `docs/v 0.17/netlib_v0.17.3.md` (or bump to 0.17.4 if released separately), commit, push.
+For each change: `bash -n`, `shellcheck -S warning`, a new or adjusted VM test, the full suite, a changelog note in `docs/changelog/v0.17.3.md` (or bump to 0.17.4 if released separately), commit, push.
 
 ## Step 3: Merge prep
 - **Docs:** check that README sections match the code: PF lock, Privoxy, hosts, installer notes, `FOXHOLE_ASSUME_YES`, `tests/vm/run.sh`, `FOXHOLE_VM_NET=bridged`.
 - **CLAUDE.md "Commands / Testing" section:** still describes the old pf.conf testing. Propose the text to the user. It's their file and it has uncommitted edits, so ask first.
 - **PLAN.md:** tick the stale items and add a summary line.
-- **Test report:** write one consolidated `docs/testing/vm-test-report-<date>.md` (like the 2026-11-03 one). Optionally prune the 13 logs to the meaningful ones.
+- **Test report:** write one consolidated `docs/testing/reports/vm-test-report-<date>.md` (like the 2026-11-03 one). Optionally prune the 13 logs to the meaningful ones.
 - **GitNexus:** `node .gitnexus/run.cjs analyze --index-only`, then `detect-changes --scope compare --base-ref main`. Bash functions are not indexed (impact = UNKNOWN), so suggest a `.gitnexusignore` for `free-claude-code/` to the user.
 - **PR (only on the user's go):**
   - Title and body come from `CHECKPOINT.md` lines 11–13. Check for a PR template first, and end the body with the attribution line.

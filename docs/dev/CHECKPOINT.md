@@ -3,9 +3,11 @@
 Read first: this file, then `SESSION_PLAN.md` (checkpoint list CP0–CP10), then `NEXT_SESSION.md` for background.
 
 ## State
+- Docs layout (reorganised 2026-11-05): `docs/changelog/` (release notes), `docs/testing/` (README, `reports/`, `logs/`), `docs/dev/` (these working notes, PR text, CLAUDE.md draft), `docs/archive/`. Index: `docs/README.md`. `tests/vm/run.sh` now writes logs to `docs/testing/logs/`.
+- PR #1 could not be retitled by the session (GitHub integration returned 403); paste the title/body from `docs/dev/PR-1-text.md` by hand.
 - Branch `debug`, remote `origin` = `git@github-foxhole:Gr3y-foX/foxhole-macos.git` (SSH works; run `ssh`/`git push` outside the sandbox, the sandbox blocks DNS).
 - Done: CP0, CP1, CP3, CP4, D2, D4, CP8 (GitNexus re-indexed, detect-changes low), README + report + changelog, T18 real Privoxy, T19 real WireGuard. Open: CP7 CLAUDE.md text (draft in `CLAUDE_MD_DRAFT.md`, needs the user), CP9 PR decision.
-- PR `debug` → `main`: **PR #1 is already open** (created by the user 2026-11-03; title still "fix(netlib): v0.16 — Phase 1+2 audit fixes", so the old notes saying "no PR exists" were stale). Every push to `debug` updates it. Ask the user before changing its title/body; the text below is the suggested new one. PR text: title `v0.17.3: PF DNS lock in com.apple/* child anchor, installer fixes, VM test suite`; body from `docs/v 0.17/netlib_v0.17.3.md` + VM result + open items.
+- PR `debug` → `main`: **PR #1 is already open** (created by the user 2026-11-03; title still "fix(netlib): v0.16 — Phase 1+2 audit fixes", so the old notes saying "no PR exists" were stale). Every push to `debug` updates it. Ask the user before changing its title/body; the text below is the suggested new one. PR text: title `v0.17.3: PF DNS lock in com.apple/* child anchor, installer fixes, VM test suite`; body from `docs/changelog/v0.17.3.md` + VM result + open items.
 - CI: green on `debug` since the billing lock was lifted (lint push + pull_request runs).
 
 ## User decisions (CP2, answered 2026-11-04)
@@ -23,7 +25,7 @@ Read first: this file, then `SESSION_PLAN.md` (checkpoint list CP0–CP10), then
 
 ## Next steps (in order)
 1. (done) D1/D2/D4, README, report, changelog, GitNexus (CP8), T18 real Privoxy, installer Tor option.
-2. CP7 rest: show the user `docs/testing/CLAUDE_MD_DRAFT.md` (new "Commands"/"Testing" text for CLAUDE.md) and apply only if they agree; ask about the stale GitNexus stats (7373 symbols) and the `.claude/skills` table in CLAUDE.md.
+2. CP7 rest: show the user `docs/dev/CLAUDE_MD_DRAFT.md` (new "Commands"/"Testing" text for CLAUDE.md) and apply only if they agree; ask about the stale GitNexus stats (7373 symbols) and the `.claude/skills` table in CLAUDE.md.
 3. CP9: PR #1 exists. Ask the user whether to retitle it with the text above (the current title is v0.16) and whether to subscribe to its activity (`subscribe_pr_activity`).
 4. CI: `lint` is green on push and pull_request for `5afa8fb`, `e7ae7dd`, `c4984a2` (checked via the public API 2026-11-04 night); re-check after new pushes.
 5. Optional: GUI-cask timeout in the installer (only affects headless VMs); real Mullvad test (needs the user, see below); `foxhole-doh` image (GUI click).

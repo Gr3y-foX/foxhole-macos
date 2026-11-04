@@ -28,7 +28,7 @@ Don't touch the user's uncommitted `CLAUDE.md` / `AGENTS.md`.
     `_pf_legacy_cleanup` removes the old pf.conf marker block once.
 - [x] 1.3 `pfctl -E` token stored under `~/.foxhole/` (or `/var/db/foxhole/`), `pfctl -X <token>` on disable
 - [x] 1.4 `launchctl bootstrap|bootout system` instead of `load|unload` (netlib lines ~316, 347, 612–630)
-- [x] Version bump → 0.17.3 + `docs/v 0.17/netlib_v0.17.3.md`
+- [x] Version bump → 0.17.3 + `docs/changelog/v0.17.3.md`
   - [x] VM: `run.sh --reset` 49/0/4 (logs 175310, 175751); reboot test: lock re-applied at boot with a new token
   - [ ] Real Mullvad on the host side-by-side (simulated with a 2nd `pfctl -E` holder only)
   - [x] `run.sh --reset` right after a VM reboot once produced no log — fixed by the graceful shutdown (`e240e12`)
@@ -55,7 +55,7 @@ Don't touch the user's uncommitted `CLAUDE.md` / `AGENTS.md`.
 - [x] Tunnel test **without WireGuard** (T12): IPv4 on system `utun3` + a TEST-NET-3 host route through it → DNS passes the `utun3` rule, `vpn_active` sees the VPN. Found: PF has no `utun+` wildcard → explicit `utun0-15`. A real WireGuard run needs brew (→ Xcode CLT) in the VM; deferred.
 - [x] T13 real `proxy-toggle.sh` + LaunchDaemon + networksetup with a stand-in listener (found: `/usr/local/bin` missing on clean Apple Silicon → script never written)
 - [x] T14 `FOXHOLE_ASSUME_YES`
-- [x] Base installer run end to end in the VM (`foxhole-brew` image = clean + Homebrew + CLT): 6 findings fixed (see `docs/v 0.17/netlib_v0.17.3.md`, "Installer run"), T15 tests
+- [x] Base installer run end to end in the VM (`foxhole-brew` image = clean + Homebrew + CLT): 6 findings fixed (see `docs/changelog/v0.17.3.md`, "Installer run"), T15 tests
 - [x] Real Privoxy binary in the VM: T18 (8/8, `FOXHOLE_VM_BASE=foxhole-brew`, 2026-11-04). [x] Real WireGuard in the VM: T19 (5/5, wireguard-go, 2026-11-04)
 - [ ] BlockBlock cask installer needs a GUI session (hangs headless) — maybe add a timeout around cask installs
 
@@ -70,7 +70,7 @@ Don't touch the user's uncommitted `CLAUDE.md` / `AGENTS.md`.
 
 ## Log
 - 2026-11-03: plan written; Step 0 / 1.1 checked. Logs 170637/170811/170950 are runs cut off by a dropped SSH session (left untracked); 171053 is the good one.
-- 2026-11-03 evening: user unplugged the SSD; did the offline bug sweep (Step 1b). Details: `docs/v 0.17/netlib_v0.17.2-changes.md` → Second pass.
+- 2026-11-03 evening: user unplugged the SSD; did the offline bug sweep (Step 1b). Details: `docs/changelog/v0.17.2.md` → Second pass.
 - 2026-11-03 night: SSD back. Step 1.2–1.4 done ("big guy"): VM research → helper/token design → 49/0/4 + reboot test. New `tests/vm/vm.sh` for ad-hoc VM work.
 - 2026-11-03 night: Step 2 egress + T11 done (64/0/0 twice). Next: WireGuard/Privoxy tests, then Step 3.
 - 2026-11-03 (next day session): T16 verified (first run found a test-side pf.conf assertion; fixed). Fresh-VM suite 100/0/0. Pushed.

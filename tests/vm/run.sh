@@ -23,8 +23,9 @@ export TART_HOME="${TART_HOME:-/Volumes/Disc Samsung T7/vm - backups/macos_vm}"
 VM="foxhole-test"
 CLEAN="${FOXHOLE_VM_BASE:-foxhole-clean}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-LOG_DIR="${REPO}/docs/testing"
+LOG_DIR="${REPO}/docs/testing/logs"
 LOG="${LOG_DIR}/vm-test-$(date +%Y-%m-%d_%H%M%S).log"
+mkdir -p "$LOG_DIR"
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
           -o PubkeyAuthentication=no -o LogLevel=ERROR -o ServerAliveInterval=10)
 

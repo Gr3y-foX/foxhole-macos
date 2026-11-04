@@ -24,6 +24,7 @@ Advanced hardening toolkit for macOS (Intel + Apple Silicon), focused on **pract
 - [Usage](#usage)
   - [1. Base install](#1-base-install)
   - [2. Network hardening & profiles](#2-network-hardening--profiles)
+- [Documentation](#documentation)
 - [Warnings & Disclaimer](#warnings--disclaimer)
 - [Attribution](#attribution)
 - [License](#license)
@@ -226,7 +227,13 @@ bash profile-paranoid-tor.sh
 ### Unattended runs and tests
 - `FOXHOLE_ASSUME_YES=1` answers every prompt "y" (the DNS mode defaults to `doh`; set `FOXHOLE_DNS_MODE=doh|vpn|plain` to choose).
 - `bash tests/ci/offline.sh` checks the scripts without touching the system.
-- `FOXHOLE_VM_NET=bridged bash tests/vm/run.sh --reset` runs the full suite in a Tart VM (never on your Mac). Logs go to `docs/testing/`. `FOXHOLE_VM_BASE=foxhole-brew` starts from an image with Homebrew, which also runs the real-Privoxy (T18) and real-WireGuard (T19) tests.
+- `FOXHOLE_VM_NET=bridged bash tests/vm/run.sh --reset` runs the full suite in a Tart VM (never on your Mac). Logs go to `docs/testing/logs/`; see `docs/testing/README.md`. `FOXHOLE_VM_BASE=foxhole-brew` starts from an image with Homebrew, which also runs the real-Privoxy (T18) and real-WireGuard (T19) tests.
+
+---
+
+## Documentation
+
+See [`docs/`](docs/README.md): release notes in `docs/changelog/`, how the scripts are tested in `docs/testing/` (offline checks and the Tart VM suite), maintainer working notes in `docs/dev/`, old material in `docs/archive/`.
 
 ---
 

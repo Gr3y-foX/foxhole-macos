@@ -9,8 +9,8 @@
 
 | Run | Log | Passed | Failed | Skipped |
 |---|---|---|---|---|
-| 1 (ad-hoc, before fixes) | `vm-test-2026-11-03_run1.log` | 27 | 5 | — |
-| 2 (`tests/vm/run.sh`) | `vm-test-2026-11-03_153313.log` | 31 | 0 | 4 |
+| 1 (ad-hoc, before fixes) | `../logs/vm-test-2026-11-03_run1.log` | 27 | 5 | — |
+| 2 (`tests/vm/run.sh`) | `../logs/vm-test-2026-11-03_153313.log` | 31 | 0 | 4 |
 
 Run 1's 5 failures were 3 network checks (no egress, see below) and 2 harness problems (`vpn_daily.sh` fed through a pipe). Run 2 skips the network checks when the VM has no egress and drives `vpn_daily.sh` through `expect`.
 
