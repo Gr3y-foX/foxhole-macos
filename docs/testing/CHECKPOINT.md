@@ -4,7 +4,7 @@ Read first: this file, then `SESSION_PLAN.md` (checkpoint list CP0–CP10), then
 
 ## State
 - Branch `debug`, remote `origin` = `git@github-foxhole:Gr3y-foX/foxhole-macos.git` (SSH works; run `ssh`/`git push` outside the sandbox, the sandbox blocks DNS).
-- CP0, CP1, CP3, CP4 and D2 are done. See `git log` for the head; D4 (archive `debug_netlib/`) and CP7-CP9 are open.
+- CP0, CP1, CP3, CP4 and D2 are done. See `git log` for the head; D4 is done; CP7-CP9 are open.
 - PR `debug` → `main`: not opened. Open only if the user asks. PR text: title `v0.17.3: PF DNS lock in com.apple/* child anchor, installer fixes, VM test suite`; body from `docs/v 0.17/netlib_v0.17.3.md` + VM result + open items.
 - CI: the user says billing is fixed but the account has no credit (free plan). Re-check `lint` runs once pushed.
 
@@ -12,7 +12,7 @@ Read first: this file, then `SESSION_PLAN.md` (checkpoint list CP0–CP10), then
 - **D1:** make it configurable. DNS modes via `FOXHOLE_DNS_MODE` or a menu prompt: `doh` (default, Quad9 on tcp 443 only), `vpn` (no Quad9 exception, DNS only through the tunnel; the user's own Mullvad setup with Quad9 inside the VPN), `plain` (Quad9 any port, old behaviour).
 - **D2:** yes. Helper `start` re-renders the physical-interface list at boot, falls back to the rules file as written. Test in the VM before shipping; `create_net_backup` (writes `restore.sh`) is the safety net.
 - **D3:** keep the `sudo pfctl -d` message, no auto-disable (my recommendation; user left it to me).
-- **D4:** move `debug_netlib/` to `docs/archive/` (not done yet).
+- **D4:** done: `debug_netlib/` moved to `docs/archive/debug_netlib/`.
 - **R1:** remote already switched to `foxhole-macos` by the user.
 
 ## Work in the commit "feat(netlib): DNS modes + interface re-render" (CP4 + D2 done)
@@ -26,7 +26,7 @@ Read first: this file, then `SESSION_PLAN.md` (checkpoint list CP0–CP10), then
 
 ## Next steps (in order)
 1. (done) D1/D2 committed and pushed.
-2. D4: `git mv debug_netlib docs/archive/debug_netlib`, fix references (`grep -rn debug_netlib`), commit, push.
+2. (done) D4 archived.
 3. CP7 docs: README vs code (DNS modes, `FOXHOLE_DNS_MODE`), draft the new CLAUDE.md "Testing" text and **show it to the user before editing**, tick PLAN.md, consolidated test report, drop stale claims.
 4. CP8 GitNexus: `node .gitnexus/run.cjs analyze --index-only`, then `detect-changes --scope compare --base-ref main` (bash = UNKNOWN; confirm callers with `grep -rn`).
 5. CP9: ask whether to open the PR.
