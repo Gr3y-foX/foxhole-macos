@@ -257,6 +257,22 @@ chk "Gatekeeper: disabled state (exit 1) is detected, no 'Unable to determine'" 
 chk "Gatekeeper: --master-enable issued after answering yes" 'test -f /tmp/gk_on'
 rm -f /tmp/gk_on
 
+echo "== T16 create_net_backup + restore.sh"
+cp /etc/hosts /tmp/hosts.t16
+create_net_backup > /tmp/t16-backup.out 2>&1
+BK=$(ls -d "$HOME"/.foxhole/backups/* | tail -1)
+chk "backup holds hosts, pf.conf, system-dns.txt, network_proxies.txt" 'test -f $BK/hosts && test -f $BK/pf.conf && test -f $BK/system-dns.txt && test -f $BK/network_proxies.txt'
+chk "backup holds restore.sh (the old message pointed at a rollback.sh that did not exist)" 'test -x $BK/restore.sh && grep -q "restore.sh" /tmp/t16-backup.out && ! grep -q "rollback.sh" /tmp/t16-backup.out'
+chk "restore.sh parses" 'bash -n $BK/restore.sh'
+echo "# t16 tampering" | sudo tee -a /etc/hosts >/dev/null
+chk "restore.sh refuses to run without root" '! bash $BK/restore.sh >/dev/null 2>&1'
+# shellcheck disable=SC2024  # the redirect target is a user-owned /tmp file
+sudo bash $BK/restore.sh > /tmp/t16-restore.out 2>&1; RR=$?
+chk "restore.sh exits 0 and restores /etc/hosts byte-for-byte" '[[ $RR -eq 0 ]] && cmp -s /etc/hosts /tmp/hosts.t16'
+chk "restored /etc/hosts is root:wheel 644" '[[ "$(stat -f "%Su:%Sg %Lp" /etc/hosts)" == "root:wheel 644" ]]'
+chk "pf.conf unchanged by restore" 'cmp -s /etc/pf.conf /tmp/pf.conf.baseline'
+rm -rf "$HOME/.foxhole"
+
 echo "== T10 vpn_daily.sh menu from another cwd (driven by expect: ask() needs a tty)"
 cat > /tmp/vd.exp <<'EXP'
 set timeout 30

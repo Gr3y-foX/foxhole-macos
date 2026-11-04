@@ -152,10 +152,45 @@ create_net_backup() {
         && sudo cp "$PRIV_PLIST" "${NET_BACKUP_DIR}/proxytoggle.plist" \
         && log "  [✓] Privoxy LaunchDaemon plist"
 
+    _write_restore_script "$NET_BACKUP_DIR"
+
     echo ""
     log "Backup saved to: ${NET_BACKUP_DIR}"
-    info "To restore: sudo bash ${NET_BACKUP_DIR}/../rollback.sh"
+    info "To restore /etc/hosts, /etc/pf.conf and /etc/resolver: sudo bash ${NET_BACKUP_DIR}/restore.sh"
     echo ""
+}
+
+# restore.sh lives next to the files it restores and only uses its own directory
+_write_restore_script() {
+    local DIR="$1"
+    cat > "${DIR}/restore.sh" <<'RESTORE'
+#!/bin/bash
+# Restores the files saved next to this script. Run: sudo bash restore.sh
+# Does not touch PF state; reload afterwards if you restored pf.conf:
+#   sudo pfctl -f /etc/pf.conf
+set -u
+[[ "$EUID" -eq 0 ]] || { echo "Run with sudo: sudo bash $0"; exit 1; }
+DIR="$(cd "$(dirname "$0")" && pwd)"
+RC=0
+restore() {  # restore <saved name> <destination>
+    if [[ -f "${DIR}/$1" ]]; then
+        install -m 644 -o root -g wheel "${DIR}/$1" "$2" \
+            && echo "[+] restored $2" || { echo "[!] failed: $2"; RC=1; }
+    else
+        echo "[-] no saved copy of $2 — skipped"
+    fi
+}
+restore hosts /etc/hosts
+restore pf.conf /etc/pf.conf
+if [[ -d "${DIR}/resolver" ]]; then
+    mkdir -p /etc/resolver && cp -R "${DIR}/resolver/." /etc/resolver/ \
+        && echo "[+] restored /etc/resolver" || RC=1
+fi
+dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null
+echo "Proxy and DNS-server settings are not restored automatically; see network_proxies.txt and system-dns.txt."
+exit $RC
+RESTORE
+    chmod 700 "${DIR}/restore.sh"
 }
 
 # ──────────────────────────────────────────
