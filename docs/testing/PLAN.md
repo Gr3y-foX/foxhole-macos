@@ -64,7 +64,7 @@ Don't touch the user's uncommitted `CLAUDE.md` / `AGENTS.md`.
 ## Step 3 — P3 quality / merge prep
 - [x] `FOXHOLE_ASSUME_YES=1` for `ask` (netlib + installer; T14, `tests/ci/offline.sh`)
 - [x] Shellcheck warnings in shipped scripts (SC2229, SC2155, SC2034); `BASE_SUM` removed
-- [x] CI: `.github/workflows/lint.yml` (bash 3.2 syntax, shellcheck, `tests/ci/offline.sh`) — written, not yet seen running on GitHub
+- [ ] CI: `.github/workflows/lint.yml` (Linux shellcheck job + macOS job with bash 3.2 syntax and `tests/ci/offline.sh`). **Blocked by GitHub: "The job was not started because your account is locked due to a billing issue"** (every run since the first push; no step ever executed). Needs the account owner to fix billing; then re-run and check. The same checks pass locally (shellcheck clean, offline.sh 13/13).
 - [ ] Decide on `debug_netlib/`; point CLAUDE.md testing section at `tests/vm/run.sh` (after the user's own edits are in)
 - [ ] Refresh GitNexus index; PR debug→main (only when the user asks)
 

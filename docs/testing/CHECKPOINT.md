@@ -2,7 +2,8 @@
 
 ## Branch / PR state
 - Work branch: `debug`. `main` is still v0.16.1. **Never push to main; work only on `debug`.**
-- Remote `debug` is at `f59538b`, in sync with local. Pushed commits:
+- CI status: all `lint` runs fail before any step starts: GitHub says the account is locked due to a billing issue (owner must fix; check via https://api.github.com/repos/Gr3y-foX/foxhole-macos/actions/runs). Workflow now has a Linux shellcheck job and a separate macOS job.
+- Latest fresh-VM suite: 100 passed / 0 failed / 0 skipped (`vm-test-2026-11-03_233425.log`, includes T16). Remote `debug` was at `f59538b` when this section was written; see `git log` for the current head.
   - `e6730f3` fix(install): OverSight/Mergen downloads, brew vulns, Gatekeeper, SSH-aware firewall (VM suite 93/0/0)
   - `548c6e5` docs: plan and checkpoint after the installer run
   - `f59538b` WIP: `restore.sh` in net backups + T16 test (T16 NOT run in the VM yet)
@@ -18,8 +19,7 @@
 - Test infra: `FOXHOLE_VM_NET=bridged` (real internet in the VM); graceful VM shutdown; `tests/vm/vm.sh`; `tests/ci/offline.sh`; `.github/workflows/lint.yml` (not yet seen running on GitHub); `FOXHOLE_ASSUME_YES=1`.
 
 ## Uncommitted / unverified
-- `mac-hardening-netlib.sh`: `create_net_backup` now writes `restore.sh` into the backup dir (old message pointed to a non-existent `rollback.sh`). Syntax and shellcheck OK, not run.
-- `tests/vm/vmtest.sh`: T16 tests that restore. Not run. Run: `FOXHOLE_VM_NET=bridged bash tests/vm/run.sh --reset`.
+- Nothing in the code is unverified now: `restore.sh` + T16 passed on a fresh VM (100/0/0). Only `CLAUDE.md`/`AGENTS.md` are modified (the user's own edits).
 
 ## Environment
 - Tart VMs: `foxhole-test` (work), `foxhole-clean` (base), `foxhole-brew` (clean + Homebrew + CLT). `run.sh --reset` clones `foxhole-clean`, so brew-dependent work needs `tart clone foxhole-brew foxhole-test` first.
