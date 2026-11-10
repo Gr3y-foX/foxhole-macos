@@ -1,6 +1,20 @@
-# Checkpoint — 2026-11-04 night (resume here)
+# Checkpoint — 2026-11-10 (resume here)
 
 Read first: this file, then `SESSION_PLAN.md` (checkpoint list CP0–CP10), then `NEXT_SESSION.md` for background.
+
+## 2026-11-10: lockout audit and v0.17.4
+
+- Audit: brief `AUDIT_PF_LOCKOUT.md`, report `AUDIT_PF_LOCKOUT_REPORT.md` (17 findings, F1–F17).
+- **Branch `private-all`** (new, pushed to origin; the user wants all work to land there first, then be filtered to `debug` and later `main`). `debug` and `main` are still at `80f2847`; PR #1 is untouched. Note: a branch in the same GitHub repo is as visible as the repo itself.
+- v0.17.4 fixes F1–F6, F8, F10–F17: see `../changelog/v0.17.4.md`. Open: **F7** (merge the interface list instead of replacing it: reverses D2, needs a decision), **F9** (`quick` pass rules vs a VPN kill switch: needs real Mullvad), the `/usr/local/libexec` ownership check, `update_hosts` (API failure exits; user-owned temp file).
+- VM: 159/0/0 plus 12/0/0 after a reboot on the Homebrew image, `../testing/reports/vm-test-report-2026-11-10.md`. `run.sh` now has a reboot phase (T26). Offline 42/42.
+- One T17 failure in the first run of the day has no proven cause (report, "The earlier run today"). If "block rules and utun passes loaded" fails again right after an enable, read `/var/log/foxhole-pf.log` in the VM before anything else.
+- GitNexus CLI does not load on this Mac (x86_64 native module on arm64): callers were confirmed with `grep -rn`. Repair: `node /usr/local/lib/node_modules/gitnexus/node_modules/@ladybugdb/core/install.js`, then re-run `analyze`.
+- Next: decide F7; real Mullvad test for F9/F10; cherry-pick or merge `private-all` into `debug` when the user says so (that updates PR #1).
+
+---
+
+# Checkpoint — 2026-11-04 night
 
 ## State
 - Docs layout (reorganised 2026-11-05): `docs/changelog/` (release notes), `docs/testing/` (README, `reports/`, `logs/`), `docs/dev/` (these working notes, PR text, CLAUDE.md draft), `docs/archive/`. Index: `docs/README.md`. `tests/vm/run.sh` now writes logs to `docs/testing/logs/`.

@@ -19,8 +19,8 @@ echo "== anchor rendering"
 # sudo shim: render the anchor into $T instead of /etc/pf.anchors
 sudo() {
     case "$1" in
-        mkdir) return 0 ;;
-        install) cp "${@: -2:1}" "$T/anchor.rules" ;;
+        mkdir|chown|chmod|mv|rm) return 0 ;;
+        tee) cat > "$T/anchor.rules" ;;
         *) "$@" ;;
     esac
 }
@@ -61,8 +61,17 @@ echo "== PF lock enable/disable order (v0.17.4)"
 sed -n '/^enable_pf_dns_lock() {/,/^}/p' "$REPO/mac-hardening-netlib.sh" > "$T/enable.fn"
 sed -n '/^disable_pf_dns_lock() {/,/^}/p' "$REPO/mac-hardening-netlib.sh" > "$T/disable.fn"
 chk "enable: synchronous start precedes the boot daemon install" \
-    '[[ "$(grep -n "helper\" start" "$T/enable.fn" | head -1 | cut -d: -f1)" -lt "$(grep -n "_install_pf_launchdaemon" "$T/enable.fn" | head -1 | cut -d: -f1)" ]]'
-chk "enable: no status poll loop left" '! grep -q "sleep 0.5" "$T/enable.fn"'
+    '[[ "$(grep -n "HELPER\" start" "$T/enable.fn" | head -1 | cut -d: -f1)" -lt "$(grep -n "_install_pf_launchdaemon" "$T/enable.fn" | head -1 | cut -d: -f1)" ]]'
+chk "enable: status is checked again after the boot daemon install" \
+    '[[ "$(grep -n "HELPER\" status" "$T/enable.fn" | tail -1 | cut -d: -f1)" -gt "$(grep -n "_install_pf_launchdaemon" "$T/enable.fn" | head -1 | cut -d: -f1)" ]]'
+chk "enable: every failure path after the start rolls back" '[[ "$(grep -c "_pf_lock_rollback" "$T/enable.fn")" == 3 ]]'
+chk "enable: the order check above found both lines" \
+    'grep -q "HELPER\" start" "$T/enable.fn" && grep -q "_install_pf_launchdaemon" "$T/enable.fn"'
+chk "enable: prepared rules are promoted only after the confirmation and the guard (F5)" \
+    '[[ "$(grep -n "mv -f \"\$PF_LOCK_RULES_NEW\"" "$T/enable.fn" | head -1 | cut -d: -f1)" -gt "$(grep -n "_pf_main_has_apple_anchor" "$T/enable.fn" | head -1 | cut -d: -f1)" ]] && grep -q "mv -f \"\$PF_LOCK_RULES_NEW\"" "$T/enable.fn"'
+sed -n '/^prepare_pf_dns_lock_anchor() {/,/^}/p' "$REPO/mac-hardening-netlib.sh" > "$T/prepare.fn"
+chk "prepare never writes the live rules file (F5)" \
+    'grep -q "PF_ANCHOR=\"\$PF_LOCK_RULES_NEW\"" "$T/prepare.fn" && ! grep -q "\$PF_LOCK_RULES\"" "$T/prepare.fn"'
 chk "disable: anchor flushed before the helper re-install" \
     '[[ "$(grep -n "F all" "$T/disable.fn" | head -1 | cut -d: -f1)" -lt "$(grep -n "_install_pf_helper" "$T/disable.fn" | head -1 | cut -d: -f1)" ]]'
 
@@ -70,11 +79,24 @@ echo "== v0.17.4 static fixes (audit F10-F16)"
 awk "/<<'HELPER'\$/{f=1;next} /^HELPER\$/{f=0} f" "$REPO/mac-hardening-netlib.sh" > "$T/helper.sh"
 chk "helper parses" '/bin/bash -n "$T/helper.sh"'
 chk "helper flushes the anchor on every start failure (F11)" \
-    '[[ "$(grep -c "pf -a \"\$ANCHOR\" -F all" "$T/helper.sh")" -ge 4 ]]'
+    '[[ "$(grep -c "start_failed \"" "$T/helper.sh")" == 3 ]] && grep -q "held_token >/dev/null || pf -a \"\$ANCHOR\" -F all" "$T/helper.sh"'
+chk "helper is not empty and has all four actions" \
+    '[[ "$(grep -cE "^    (start|boot|stop|status)\)" "$T/helper.sh")" == 4 ]]'
+chk "helper has no temp file and never touches the main ruleset" \
+    '! grep -q mktemp "$T/helper.sh" && ! grep -qE "pfctl +-d|-f +/etc/pf\.conf" "$T/helper.sh"'
+chk "helper status requires the com.apple/* anchor in the main ruleset (F8)" \
+    'grep -q "rules_loaded && held_token >/dev/null && main_has_anchor" "$T/helper.sh"'
+chk "helper boot retries are bounded (F8)" 'grep -q "\"\$N\" -ge 5" "$T/helper.sh"'
+sed -n '/^_install_pf_launchdaemon() {/,/^}/p' "$REPO/mac-hardening-netlib.sh" > "$T/ld.fn"
+awk "/<< 'EOF'\$/{f=1;next} /^EOF\$/{f=0} f" "$T/ld.fn" > "$T/pf.plist"
+chk "LaunchDaemon plist is well-formed and runs the helper's boot action" \
+    'plutil -lint "$T/pf.plist" >/dev/null 2>&1 && grep -q "<string>boot</string>" "$T/pf.plist" && grep -q "<string>${PF_LOCK_HELPER}</string>" "$T/pf.plist" && grep -q "<string>${PF_LOCK_LABEL}</string>" "$T/pf.plist"'
+chk "LaunchDaemon writer reports failure to its caller (F3)" '[[ "$(grep -c "return 1" "$T/ld.fn")" -ge 3 ]]'
+chk "no user-owned staging files left in the PF lock code (F14)" \
+    '[[ "$(grep -c "mktemp" "$REPO/mac-hardening-netlib.sh")" == 1 ]] && grep -q "TMP_HOSTS=\$(mktemp)" "$REPO/mac-hardening-netlib.sh"'
+chk "vpn_daily offers a backup snapshot (F17)" 'grep -q "create_net_backup" "$REPO/vpn_daily.sh"'
 chk "helper releases the reference if the token cannot be saved (F12)" \
     'grep -q "cannot write \$TOKEN_FILE; PF reference released" "$T/helper.sh"'
-chk "anchor install failure removes its temp file (F15)" \
-    'grep -q "rm -f \"\$TMP\"; die \"Failed to install PF anchor" "$REPO/mac-hardening-netlib.sh"'
 chk "menu and vpn_daily guard enable_pf_dns_lock (F13)" \
     'grep -q "enable_pf_dns_lock || warn" "$REPO/mac-hardening-netlib.sh" && grep -q "enable_pf_dns_lock || warn" "$REPO/vpn_daily.sh"'
 chk "reset runs each step in a subshell (F16)" \

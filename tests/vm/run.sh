@@ -76,4 +76,21 @@ ssh_vm 'bash ~/foxhole/tests/vm/vmtest.sh > ~/vmtest.log 2>&1; echo "vmtest exit
     | tr -d '\r' | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | tee "$LOG" || true
 echo "ssh exit: ${PIPESTATUS[0]}" | tee -a "$LOG"
 
+# Phase 2: vmtest.sh left the lock on. Reboot and check that it comes back by itself.
+echo "Rebooting the VM for the after-reboot phase..." | tee -a "$LOG"
+ssh_vm 'sync; sudo shutdown -r now' >/dev/null 2>&1 || true
+sleep 20
+UP=0
+for _ in $(seq 1 60); do
+    IP=$(tart ip "$VM" "${IP_ARGS[@]}" 2>/dev/null || true)
+    if [[ -n "$IP" ]] && nc -z -G2 "$IP" 22 2>/dev/null && ssh_vm true 2>/dev/null; then UP=1; break; fi
+    sleep 3
+done
+if [[ "$UP" == 1 ]]; then
+    ssh_vm 'bash ~/foxhole/tests/vm/vmtest.sh --after-reboot > ~/vmtest2.log 2>&1; echo "vmtest phase 2 exit: $?" >> ~/vmtest2.log; cat ~/vmtest2.log' 2>&1 \
+        | tr -d '\r' | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | tee -a "$LOG" || true
+else
+    echo "  FAIL: VM did not come back after the reboot (phase 2 not run)" | tee -a "$LOG"
+fi
+
 echo "Log saved: ${LOG}"

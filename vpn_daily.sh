@@ -3,7 +3,7 @@
 # foxhole-macos — VPN Daily Profile
 #
 # File:    vpn_daily.sh
-# Version: 0.17.3 (2026)
+# Version: 0.17.4 (2026)
 # Author:  Gr3y-foX
 # Based on: drduh/macOS-Security-and-Privacy-Guide (MIT)
 # License: GNU GPL v3 — see LICENSE for details
@@ -55,6 +55,14 @@ main() {
   sudo -v || die "sudo authentication failed."
   echo ""
 
+  ask "Create backup snapshot before proceeding?" CONFIRM_BK
+  if [[ "$CONFIRM_BK" == "y" || "$CONFIRM_BK" == "Y" ]]; then
+    create_net_backup
+  else
+    warn "Skipping backup — proceeding without snapshot."
+    echo ""
+  fi
+
   while true; do
     echo "Choose an action:"
     echo "  [1] Enable PF DNS lock (blocks plain DNS 53/853 outside the VPN tunnel)"
@@ -94,6 +102,8 @@ main() {
         echo "3) Run [1] to enable the PF DNS lock."
         echo "   VPN traffic on utun interfaces is not affected by the lock."
         echo "4) If DNS stops working: run [2] to disable the lock, then [3] to diagnose."
+        echo "5) Captive portals (hotel/airport Wi-Fi) and VPN clients that find their"
+        echo "   server by name need plain DNS: run [2] to join, then [1] again."
         echo ""
         echo "=== How to check that the VPN is working and there are no DNS leaks ==="
         echo "   1) Connect to the VPN."

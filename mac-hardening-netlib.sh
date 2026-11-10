@@ -213,7 +213,7 @@ if [[ -s "$LOCK_TOKEN" ]]; then
                || echo "[!] PF reference ${LOCK_REF} not released (already gone, or held by another tool)" ;;
     esac
 fi
-rm -f "$LOCK_TOKEN" "$LOCK_HELPER" "$LOCK_RULES"
+rm -f "$LOCK_TOKEN" "$LOCK_HELPER" "$LOCK_RULES" "${LOCK_RULES}.new" "${LOCK_PLIST}.new"
 echo "[+] PF DNS lock removed (anchor flushed, boot daemon removed)"
 dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null
 echo "Proxy and DNS-server settings are not restored automatically; see network_proxies.txt and system-dns.txt."
@@ -257,6 +257,10 @@ resolve_brew_prefix() {
 # ruleset (VPN kill switches live there too) is never reloaded.
 readonly PF_LOCK_ANCHOR="com.apple/foxhole.dnsleak"
 readonly PF_LOCK_RULES="/etc/pf.anchors/com.hardening.dnsleak"
+# prepare_pf_dns_lock_anchor writes here; enable_pf_dns_lock moves it into place once
+# the user confirmed. The boot helper never reads it, so a declined mode switch
+# cannot take effect at the next boot.
+readonly PF_LOCK_RULES_NEW="${PF_LOCK_RULES}.new"
 readonly PF_LOCK_HELPER="/usr/local/libexec/foxhole-pf-dnslock"
 readonly PF_LOCK_TOKEN="/var/db/foxhole/pf.token"
 readonly PF_LOCK_LABEL="com.hardening.pf.dnsleak"
@@ -301,7 +305,7 @@ _choose_dns_mode() {
 }
 
 prepare_pf_dns_lock_anchor() {
-    local PF_ANCHOR="$PF_LOCK_RULES"
+    local PF_ANCHOR="$PF_LOCK_RULES_NEW"
     local DNS_MODE
     DNS_MODE=$(_choose_dns_mode)
     info "DNS policy: ${DNS_MODE}"
@@ -316,9 +320,8 @@ prepare_pf_dns_lock_anchor() {
     for N in $(seq 0 15); do UTUNS="${UTUNS}${UTUNS:+ }utun${N}"; done
     info "Physical interfaces scoped for DNS block: ${IFACES}"
 
-    # Atomic write via tmpfile + install (CR-2 TOCTOU fix)
-    local TMP
-    TMP=$(mktemp /tmp/pf.anchor.XXXXXX)
+    # Streamed straight to a root-owned file: no user-owned staging file that
+    # another process of the same user could rewrite before root installs it.
     {
         cat <<'EOF'
 # ============================================================
@@ -377,26 +380,28 @@ EOF
         printf 'block out quick on { %s } proto { udp tcp } to any port 853\n' "$IFACES"
         printf 'block out quick on { %s } inet6 proto { udp tcp } to any port 53\n' "$IFACES"
         printf 'block out quick on { %s } inet6 proto { udp tcp } to any port 853\n' "$IFACES"
-    } > "$TMP"
-    sudo install -m 644 -o root -g wheel "$TMP" "$PF_ANCHOR" \
-        || { rm -f "$TMP"; die "Failed to install PF anchor: ${PF_ANCHOR}"; }
-    rm -f "$TMP"
-    log "  [✓] PF anchor written: ${PF_ANCHOR}"
+    } | sudo tee "$PF_ANCHOR" >/dev/null \
+        || { sudo rm -f "$PF_ANCHOR"; die "Failed to write PF anchor: ${PF_ANCHOR}"; }
+    { sudo chown root:wheel "$PF_ANCHOR" && sudo chmod 644 "$PF_ANCHOR"; } \
+        || { sudo rm -f "$PF_ANCHOR"; die "Failed to set owner/mode on ${PF_ANCHOR}"; }
+    log "  [✓] PF anchor prepared: ${PF_ANCHOR} (applied when the lock is enabled)"
 }
 
 # Helper shared by enable, disable and the boot LaunchDaemon (one code path)
 _install_pf_helper() {
     sudo mkdir -p "$(dirname "$PF_LOCK_HELPER")"
-    local TMP
-    TMP=$(mktemp /tmp/foxhole-pf-helper.XXXXXX)
-    cat > "$TMP" <<'HELPER'
+    # Streamed to root (no user-owned staging file): root runs this at every boot
+    if ! sudo tee "${PF_LOCK_HELPER}.new" >/dev/null <<'HELPER'
 #!/bin/bash
 # foxhole-macos PF DNS lock helper — installed by mac-hardening-netlib.sh
 #   start   load the rules into com.apple/foxhole.dnsleak and hold one PF
 #           enable reference (pfctl -E)
-#   stop    flush the rules and release that reference (pfctl -X); PF goes
+#   boot    same as start, retried a few times (used by the LaunchDaemon: PF
+#           or the main ruleset may not be ready the moment launchd runs it)
+#   stop   flush the rules and release that reference (pfctl -X); PF goes
 #           back off unless something else (e.g. a VPN kill switch) holds one
-#   status  exit 0 if the rules are loaded and the reference is held
+#   status  exit 0 if the rules are loaded, the reference is held and the main
+#           ruleset evaluates anchor "com.apple/*" (otherwise the lock is inert)
 # The stock /etc/pf.conf evaluates anchor "com.apple/*", so neither
 # /etc/pf.conf nor the main ruleset is ever touched.
 ANCHOR="com.apple/foxhole.dnsleak"
@@ -423,45 +428,80 @@ held_token() {
 
 rules_loaded() { pf -a "$ANCHOR" -sr | grep -q "port = 53"; }
 
+# Our anchor is a child of com.apple/*: without that line in the main ruleset
+# (custom pf.conf, or another tool replaced it) the rules are never evaluated
+main_has_anchor() { pf -sr | grep -qE '^anchor "com\.apple/\*"'; }
+
+anchor_warning() {
+    main_has_anchor \
+        || echo "$(date '+%F %T') WARNING: main ruleset has no anchor \"com.apple/*\"; the lock is loaded but inert" >&2
+}
+
+# A failed start must not leave block rules without a held reference (a lockout
+# nobody asked for). If our reference is held, the lock was already active and a
+# failed reload (e.g. PF busy) left the previous rules in place: keep them.
+start_failed() {
+    held_token >/dev/null || pf -a "$ANCHOR" -F all >/dev/null || true
+    echo "$(date '+%F %T') $1" >&2
+    return 1
+}
+
+# Loads the rules and holds one PF reference. Returns 1 on failure.
+do_start() {
+    local RENDERED="" IFACES OUT TOKEN
+    [[ -f "$RULES" ]] || { echo "rules file missing: $RULES" >&2; return 1; }
+    # Re-render the interface list of the block rules, so a NIC added since the
+    # rules were written is covered too. No temp file: the rules go to pfctl on
+    # stdin. Any failure falls back to $RULES as written.
+    IFACES=$(/usr/sbin/networksetup -listallhardwareports 2>/dev/null \
+        | awk '/^Device: en[0-9]+$/ {print $2}' | tr '\n' ' ' | sed 's/ $//')
+    if [[ -n "$IFACES" ]]; then
+        RENDERED=$(sed -E "s/^(block out quick on \{)[^}]*(\} )/\1 ${IFACES} \2/" "$RULES")
+        if [[ -z "$RENDERED" ]] || ! /sbin/pfctl -nf - <<< "$RENDERED" >/dev/null 2>&1; then
+            echo "re-rendered rules rejected by pfctl; using $RULES as written" >&2
+            RENDERED=""
+        fi
+    fi
+    if [[ -n "$RENDERED" ]]; then
+        pf -a "$ANCHOR" -f - <<< "$RENDERED" >&2 || { start_failed "failed to load $ANCHOR"; return 1; }
+    else
+        pf -a "$ANCHOR" -f "$RULES" >&2 || { start_failed "failed to load $ANCHOR"; return 1; }
+    fi
+    if ! held_token >/dev/null; then
+        OUT=$(pf -E)
+        TOKEN=$(sed -n 's/^Token : //p' <<< "$OUT")
+        [[ -n "$TOKEN" ]] || { start_failed "pfctl -E returned no token: $OUT"; return 1; }
+        mkdir -p "$(dirname "$TOKEN_FILE")"
+        if ! ( umask 077; echo "$TOKEN" > "$TOKEN_FILE" ); then
+            pf -X "$TOKEN" >/dev/null || true
+            pf -a "$ANCHOR" -F all >/dev/null || true
+            echo "cannot write $TOKEN_FILE; PF reference released" >&2
+            return 1
+        fi
+    fi
+    return 0
+}
+
 case "${1:-}" in
     start)
-        [[ -f "$RULES" ]] || { echo "rules file missing: $RULES" >&2; exit 1; }
-        # Re-render the interface list of the block rules, so a NIC added since the
-        # rules were written is covered too. No temp file: the rules go to pfctl on
-        # stdin. Any failure falls back to $RULES as written.
-        RENDERED=""
-        IFACES=$(/usr/sbin/networksetup -listallhardwareports 2>/dev/null \
-            | awk '/^Device: en[0-9]+$/ {print $2}' | tr '\n' ' ' | sed 's/ $//')
-        if [[ -n "$IFACES" ]]; then
-            RENDERED=$(sed -E "s/^(block out quick on \{)[^}]*(\} )/\1 ${IFACES} \2/" "$RULES")
-            if [[ -z "$RENDERED" ]] || ! /sbin/pfctl -nf - <<< "$RENDERED" >/dev/null 2>&1; then
-                echo "re-rendered rules rejected by pfctl; using $RULES as written" >&2
-                RENDERED=""
-            fi
-        fi
-        # Every failure below flushes the rules first: block rules without a held
-        # reference are a lockout nobody asked for (the reference is what makes PF run).
-        if [[ -n "$RENDERED" ]]; then
-            pf -a "$ANCHOR" -f - <<< "$RENDERED" >&2 \
-                || { pf -a "$ANCHOR" -F all >/dev/null || true; echo "failed to load $ANCHOR" >&2; exit 1; }
-        else
-            pf -a "$ANCHOR" -f "$RULES" >&2 \
-                || { pf -a "$ANCHOR" -F all >/dev/null || true; echo "failed to load $ANCHOR" >&2; exit 1; }
-        fi
-        if ! held_token >/dev/null; then
-            OUT=$(pf -E)
-            TOKEN=$(sed -n 's/^Token : //p' <<< "$OUT")
-            [[ -n "$TOKEN" ]] \
-                || { pf -a "$ANCHOR" -F all >/dev/null || true; echo "pfctl -E returned no token: $OUT" >&2; exit 1; }
-            mkdir -p "$(dirname "$TOKEN_FILE")"
-            if ! ( umask 077; echo "$TOKEN" > "$TOKEN_FILE" ); then
-                pf -X "$TOKEN" >/dev/null || true
-                pf -a "$ANCHOR" -F all >/dev/null || true
-                echo "cannot write $TOKEN_FILE; PF reference released" >&2
-                exit 1
-            fi
-        fi
+        do_start || exit 1
+        anchor_warning
         echo "$(date '+%F %T') start: rules loaded into $ANCHOR, PF reference held"
+        ;;
+    boot)
+        # launchd does not re-run a failed RunAtLoad job, so retry here (bounded)
+        N=1
+        until do_start && main_has_anchor; do
+            [[ "$N" -ge 5 ]] && break
+            N=$((N+1))
+            sleep 2
+        done
+        if ! rules_loaded || ! held_token >/dev/null; then
+            echo "$(date '+%F %T') boot: lock NOT active after $N tries" >&2
+            exit 1
+        fi
+        anchor_warning
+        echo "$(date '+%F %T') boot: rules loaded into $ANCHOR, PF reference held (try $N)"
         ;;
     stop)
         pf -a "$ANCHOR" -F all >/dev/null || true
@@ -472,16 +512,20 @@ case "${1:-}" in
         echo "$(date '+%F %T') stop: rules flushed, PF reference released"
         ;;
     status)
-        rules_loaded && held_token >/dev/null
+        rules_loaded && held_token >/dev/null && main_has_anchor
         ;;
     *)
-        echo "usage: $0 start|stop|status" >&2; exit 2
+        echo "usage: $0 start|boot|stop|status" >&2; exit 2
         ;;
 esac
 HELPER
-    sudo install -m 755 -o root -g wheel "$TMP" "$PF_LOCK_HELPER" \
-        || { rm -f "$TMP"; die "Failed to install ${PF_LOCK_HELPER}"; }
-    rm -f "$TMP"
+    then
+        sudo rm -f "${PF_LOCK_HELPER}.new"
+        die "Failed to write ${PF_LOCK_HELPER}"
+    fi
+    { sudo chown root:wheel "${PF_LOCK_HELPER}.new" && sudo chmod 755 "${PF_LOCK_HELPER}.new" \
+        && sudo mv -f "${PF_LOCK_HELPER}.new" "$PF_LOCK_HELPER"; } \
+        || { sudo rm -f "${PF_LOCK_HELPER}.new"; die "Failed to install ${PF_LOCK_HELPER}"; }
 }
 
 _launchd_bootout() {
@@ -510,16 +554,15 @@ _pf_legacy_cleanup() {
 
     if [[ -f "$PF_CONF" ]] && grep -qF "$PF_MARKER" "$PF_CONF"; then
         info "Removing the DNS lock lines an older version added to ${PF_CONF}..."
-        local TMP_CONF
-        TMP_CONF=$(mktemp)
+        # Streamed to a root-owned file next to pf.conf (no user-owned staging file)
+        local NEW_CONF="${PF_CONF}.foxhole.new"
         grep -vF -e "$PF_MARKER" \
-                 -e 'anchor "com.hardening.dnsleak"' "$PF_CONF" > "$TMP_CONF" \
-            || { rm -f "$TMP_CONF"; die "Failed to process PF configuration file"; }
+                 -e 'anchor "com.hardening.dnsleak"' "$PF_CONF" | sudo tee "$NEW_CONF" >/dev/null \
+            || { sudo rm -f "$NEW_CONF"; die "Failed to process PF configuration file"; }
         sudo cp "$PF_CONF" "${PF_CONF}.bak.hardening_$(date +%Y%m%d_%H%M%S)"
-        # install (not mv): mktemp file is user-owned 0600, pf.conf must stay root:wheel
-        sudo install -m 644 -o root -g wheel "$TMP_CONF" "$PF_CONF" \
-            || { rm -f "$TMP_CONF"; die "Failed to install ${PF_CONF}"; }
-        rm -f "$TMP_CONF"
+        { sudo chown root:wheel "$NEW_CONF" && sudo chmod 644 "$NEW_CONF" \
+            && sudo mv -f "$NEW_CONF" "$PF_CONF"; } \
+            || { sudo rm -f "$NEW_CONF"; die "Failed to install ${PF_CONF}"; }
         # The reload replaces the whole main ruleset, so a VPN kill switch loaded
         # there is dropped too. Ask first; declining keeps the main ruleset as it is.
         warn "Reloading the main PF ruleset replaces every rule in it, including a VPN kill switch's."
@@ -536,17 +579,27 @@ _pf_legacy_cleanup() {
     sudo pfctl -a com.hardening.dnsleak -F all >/dev/null 2>&1 || true
 }
 
+# Back to "lock fully off": no boot daemon, no rules, no PF reference of ours
+_pf_lock_rollback() {
+    _launchd_bootout "$PF_LOCK_LABEL"
+    sudo rm -f "$PF_LOCK_PLIST" "${PF_LOCK_PLIST}.new" || true
+    sudo /bin/bash "$PF_LOCK_HELPER" stop >/dev/null 2>&1 \
+        || sudo pfctl -a "$PF_LOCK_ANCHOR" -F all >/dev/null 2>&1 || true
+}
+
 enable_pf_dns_lock() {
     log "Enabling PF DNS leak lock..."
     warn "WARNING: Blocks direct DNS (53/853 v4/v6)."
     warn "Mode doh/plain: install the Quad9 DoH profile first. Mode vpn: set your resolver inside the VPN."
+    info "Captive portals (hotel/airport Wi-Fi) and VPN clients that find their server by name need plain DNS: disable the lock to join, then enable it again."
     ask "Continue enabling PF DNS lock?" CONFIRM
     if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
-        log "PF DNS lock aborted by user."
+        sudo rm -f "$PF_LOCK_RULES_NEW" || true
+        log "PF DNS lock aborted by user. Nothing was changed."
         return 0
     fi
 
-    [[ -f "$PF_LOCK_RULES" ]] \
+    [[ -f "$PF_LOCK_RULES_NEW" || -f "$PF_LOCK_RULES" ]] \
         || die "PF rules missing: ${PF_LOCK_RULES} (run prepare_pf_dns_lock_anchor first)"
 
     _pf_legacy_cleanup
@@ -561,8 +614,15 @@ enable_pf_dns_lock() {
         else
             err "PF main ruleset does not evaluate anchor \"com.apple/*\" — the lock would never apply."
             info "A custom /etc/pf.conf or another tool replaced it. Inspect: sudo pfctl -sr"
+            sudo rm -f "$PF_LOCK_RULES_NEW" || true
             return 1
         fi
+    fi
+
+    # Confirmed and applicable: the prepared rules become the live rules file
+    if [[ -f "$PF_LOCK_RULES_NEW" ]]; then
+        sudo mv -f "$PF_LOCK_RULES_NEW" "$PF_LOCK_RULES" \
+            || die "Failed to install PF rules: ${PF_LOCK_RULES}"
     fi
 
     _install_pf_helper
@@ -571,28 +631,40 @@ enable_pf_dns_lock() {
     # failed start cannot leave a plist that turns the lock on at the next boot.
     if ! sudo /bin/bash "$PF_LOCK_HELPER" start >/dev/null \
        || ! sudo /bin/bash "$PF_LOCK_HELPER" status >/dev/null; then
-        err "PF DNS lock did not come up. Log: /var/log/foxhole-pf.log"
+        err "PF DNS lock did not come up; rolled back (lock is off). Log: /var/log/foxhole-pf.log"
         sudo tail -n 5 /var/log/foxhole-pf.log 2>/dev/null || true
-        sudo /bin/bash "$PF_LOCK_HELPER" stop >/dev/null 2>&1 || true
+        _pf_lock_rollback
         return 1
     fi
 
-    # Boot persistence. Its RunAtLoad "start" finds the token held and only reloads
+    # Boot persistence. Its RunAtLoad run finds the token held and only reloads
     # the anchor. If the daemon cannot be installed, roll the lock back.
     if ! _install_pf_launchdaemon; then
-        err "PF DNS lock: boot daemon could not be installed; rolling back."
-        _launchd_bootout "$PF_LOCK_LABEL"
-        sudo rm -f "$PF_LOCK_PLIST"
-        sudo /bin/bash "$PF_LOCK_HELPER" stop >/dev/null 2>&1 || true
+        err "PF DNS lock: boot daemon could not be installed; rolled back (lock is off)."
+        _pf_lock_rollback
+        return 1
+    fi
+    # The daemon's RunAtLoad run reloads the anchor in the background: wait for it
+    # and check once more, so "ACTIVE" is true when this function returns.
+    local _
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        sudo launchctl print "system/${PF_LOCK_LABEL}" 2>/dev/null | grep -q 'state = running' || break
+        sleep 0.5
+    done
+    if ! sudo /bin/bash "$PF_LOCK_HELPER" status >/dev/null; then
+        err "PF DNS lock went down after the boot daemon ran; rolled back (lock is off). Log: /var/log/foxhole-pf.log"
+        sudo tail -n 5 /var/log/foxhole-pf.log 2>/dev/null || true
+        _pf_lock_rollback
         return 1
     fi
     log "PF DNS lock: ACTIVE ✓ (anchor ${PF_LOCK_ANCHOR})"
 }
 
+# Returns 1 (never exits) when the daemon is not installed and bootstrapped
 _install_pf_launchdaemon() {
-    local TMP
-    TMP=$(mktemp /tmp/foxhole-pf-plist.XXXXXX)
-    cat > "$TMP" << 'EOF'
+    _launchd_bootout "$PF_LOCK_LABEL"
+    # Streamed to root (no user-owned staging file); launchd ignores "*.plist.new"
+    if ! sudo tee "${PF_LOCK_PLIST}.new" >/dev/null << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -604,7 +676,7 @@ _install_pf_launchdaemon() {
     <array>
         <string>/bin/bash</string>
         <string>/usr/local/libexec/foxhole-pf-dnslock</string>
-        <string>start</string>
+        <string>boot</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -615,13 +687,22 @@ _install_pf_launchdaemon() {
 </dict>
 </plist>
 EOF
-    _launchd_bootout "$PF_LOCK_LABEL"
-    sudo install -m 644 -o root -g wheel "$TMP" "$PF_LOCK_PLIST" \
-        || { rm -f "$TMP"; die "Failed to install ${PF_LOCK_PLIST}"; }
-    rm -f "$TMP"
-    _launchd_bootstrap "$PF_LOCK_PLIST" \
-        && log "  [✓] PF LaunchDaemon installed (re-applies the lock at boot)" \
-        || warn "launchctl bootstrap failed for ${PF_LOCK_PLIST}"
+    then
+        sudo rm -f "${PF_LOCK_PLIST}.new" || true
+        warn "Failed to write ${PF_LOCK_PLIST}"
+        return 1
+    fi
+    if ! { sudo chown root:wheel "${PF_LOCK_PLIST}.new" && sudo chmod 644 "${PF_LOCK_PLIST}.new" \
+           && sudo mv -f "${PF_LOCK_PLIST}.new" "$PF_LOCK_PLIST"; }; then
+        sudo rm -f "${PF_LOCK_PLIST}.new" || true
+        warn "Failed to install ${PF_LOCK_PLIST}"
+        return 1
+    fi
+    if ! _launchd_bootstrap "$PF_LOCK_PLIST"; then
+        warn "launchctl bootstrap failed for ${PF_LOCK_PLIST}"
+        return 1
+    fi
+    log "  [✓] PF LaunchDaemon installed (re-applies the lock at boot)"
 }
 
 disable_pf_dns_lock() {
@@ -637,12 +718,12 @@ disable_pf_dns_lock() {
     _install_pf_helper
     sudo /bin/bash "$PF_LOCK_HELPER" stop >/dev/null \
         || warn "PF lock helper stop failed"
-    sudo rm -f "$PF_LOCK_HELPER" "$PF_LOCK_RULES" "$PF_LOCK_TOKEN"
+    sudo rm -f "$PF_LOCK_HELPER" "${PF_LOCK_HELPER}.new" "$PF_LOCK_RULES" "$PF_LOCK_RULES_NEW" "$PF_LOCK_TOKEN"
 
     _pf_legacy_cleanup
 
     if sudo pfctl -s info 2>/dev/null | grep -q "Status: Enabled"; then
-        info "PF stays enabled: another program holds a reference (sudo pfctl -s References)."
+        info "PF stays enabled: a reference is still held, by another program or a lost one of ours (sudo pfctl -s References)."
     else
         log "PF is off again (as before the lock)."
     fi
@@ -1129,7 +1210,7 @@ main() {
     echo ""
     echo "  ╔══════════════════════════════════════════╗"
     echo "  ║       macOS Network Hardening Netlib     ║"
-    echo "  ║            v0.17.3 ·  by Gr3y-foX         ║"
+    echo "  ║            v0.17.4 ·  by Gr3y-foX       ║"
     echo "  ║       ARM/M-chip  |  strict mode         ║"
     echo "  ╠══════════════════════════════════════════╣"
     echo "  ║  module: netlib   |  mode: interactive   ║"
