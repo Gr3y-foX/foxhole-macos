@@ -161,7 +161,7 @@ create_net_backup() {
 
     echo ""
     log "Backup saved to: ${NET_BACKUP_DIR}"
-    info "To restore /etc/hosts, /etc/pf.conf and /etc/resolver: sudo bash ${NET_BACKUP_DIR}/restore.sh"
+    info "To restore /etc/hosts, /etc/pf.conf and /etc/resolver and remove the PF DNS lock: sudo bash ${NET_BACKUP_DIR}/restore.sh"
     echo ""
 }
 
@@ -170,8 +170,11 @@ _write_restore_script() {
     local DIR="$1"
     cat > "${DIR}/restore.sh" <<'RESTORE'
 #!/bin/bash
-# Restores the files saved next to this script. Run: sudo bash restore.sh
-# Does not touch PF state; reload afterwards if you restored pf.conf:
+# Restores the files saved next to this script and removes the PF DNS lock.
+# Run: sudo bash restore.sh
+# The lock is always removed, never restored from the snapshot: it is runtime
+# state, and a restore must not bring back the block the user is escaping.
+# Reload pf.conf afterwards only if you restored it and no VPN kill switch is active:
 #   sudo pfctl -f /etc/pf.conf
 set -u
 [[ "$EUID" -eq 0 ]] || { echo "Run with sudo: sudo bash $0"; exit 1; }
@@ -191,6 +194,27 @@ if [[ -d "${DIR}/resolver" ]]; then
     mkdir -p /etc/resolver && cp -R "${DIR}/resolver/." /etc/resolver/ \
         && echo "[+] restored /etc/resolver" || RC=1
 fi
+# PF DNS lock: anchor-scoped. The main ruleset is not touched, and only our own
+# PF reference (the token file) is released; other holders keep theirs.
+LOCK_ANCHOR="com.apple/foxhole.dnsleak"
+LOCK_LABEL="com.hardening.pf.dnsleak"
+LOCK_HELPER="/usr/local/libexec/foxhole-pf-dnslock"
+LOCK_RULES="/etc/pf.anchors/com.hardening.dnsleak"
+LOCK_TOKEN="/var/db/foxhole/pf.token"
+LOCK_PLIST="/Library/LaunchDaemons/${LOCK_LABEL}.plist"
+launchctl bootout "system/${LOCK_LABEL}" 2>/dev/null
+rm -f "$LOCK_PLIST"
+/sbin/pfctl -a "$LOCK_ANCHOR" -F all >/dev/null 2>&1
+if [[ -s "$LOCK_TOKEN" ]]; then
+    LOCK_REF="$(cat "$LOCK_TOKEN")"
+    case "$LOCK_REF" in
+        ''|*[!0-9]*) ;;
+        *) /sbin/pfctl -X "$LOCK_REF" >/dev/null 2>&1 \
+               || echo "[!] PF reference ${LOCK_REF} not released (already gone, or held by another tool)" ;;
+    esac
+fi
+rm -f "$LOCK_TOKEN" "$LOCK_HELPER" "$LOCK_RULES"
+echo "[+] PF DNS lock removed (anchor flushed, boot daemon removed)"
 dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null
 echo "Proxy and DNS-server settings are not restored automatically; see network_proxies.txt and system-dns.txt."
 exit $RC

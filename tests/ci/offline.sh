@@ -66,6 +66,16 @@ chk "enable: no status poll loop left" '! grep -q "sleep 0.5" "$T/enable.fn"'
 chk "disable: anchor flushed before the helper re-install" \
     '[[ "$(grep -n "F all" "$T/disable.fn" | head -1 | cut -d: -f1)" -lt "$(grep -n "_install_pf_helper" "$T/disable.fn" | head -1 | cut -d: -f1)" ]]'
 
+echo "== restore.sh teardown (v0.17.4, audit F1)"
+awk "/<<'RESTORE'\$/{f=1;next} /^RESTORE\$/{f=0} f" "$REPO/mac-hardening-netlib.sh" > "$T/restore.sh"
+chk "restore.sh parses" '/bin/bash -n "$T/restore.sh"'
+chk "restore.sh boots out the lock daemon and removes its plist" \
+    'grep -q "launchctl bootout" "$T/restore.sh" && grep -q "rm -f \"\$LOCK_PLIST\"" "$T/restore.sh"'
+chk "restore.sh flushes only the foxhole anchor" \
+    'grep -q "pfctl -a \"\$LOCK_ANCHOR\" -F all" "$T/restore.sh" && ! grep -v "^#" "$T/restore.sh" | grep -qE "pfctl -(d|f) "'
+chk "restore.sh releases only our token (pfctl -X on the token file)" \
+    'grep -q "pfctl -X \"\$LOCK_REF\"" "$T/restore.sh" && grep -q "LOCK_TOKEN=\"/var/db/foxhole/pf.token\"" "$T/restore.sh"'
+
 echo "== no stale design"
 chk "no dnscrypt-proxy formula in the installer" '! grep -q "\"dnscrypt-proxy\"" "$REPO/mac-hardening-install.sh"'
 chk "installer does not run the Tor profile stub" '! grep -q "bash \"\$SCRIPT_DIR/profile-paranoid-tor.sh\"" "$REPO/mac-hardening-install.sh"'
