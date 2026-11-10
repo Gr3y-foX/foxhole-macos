@@ -379,7 +379,7 @@ EOF
         printf 'block out quick on { %s } inet6 proto { udp tcp } to any port 853\n' "$IFACES"
     } > "$TMP"
     sudo install -m 644 -o root -g wheel "$TMP" "$PF_ANCHOR" \
-        || die "Failed to install PF anchor: ${PF_ANCHOR}"
+        || { rm -f "$TMP"; die "Failed to install PF anchor: ${PF_ANCHOR}"; }
     rm -f "$TMP"
     log "  [✓] PF anchor written: ${PF_ANCHOR}"
 }
@@ -439,17 +439,27 @@ case "${1:-}" in
                 RENDERED=""
             fi
         fi
+        # Every failure below flushes the rules first: block rules without a held
+        # reference are a lockout nobody asked for (the reference is what makes PF run).
         if [[ -n "$RENDERED" ]]; then
-            pf -a "$ANCHOR" -f - <<< "$RENDERED" >&2 || { echo "failed to load $ANCHOR" >&2; exit 1; }
+            pf -a "$ANCHOR" -f - <<< "$RENDERED" >&2 \
+                || { pf -a "$ANCHOR" -F all >/dev/null || true; echo "failed to load $ANCHOR" >&2; exit 1; }
         else
-            pf -a "$ANCHOR" -f "$RULES" >&2 || { echo "failed to load $ANCHOR" >&2; exit 1; }
+            pf -a "$ANCHOR" -f "$RULES" >&2 \
+                || { pf -a "$ANCHOR" -F all >/dev/null || true; echo "failed to load $ANCHOR" >&2; exit 1; }
         fi
         if ! held_token >/dev/null; then
             OUT=$(pf -E)
             TOKEN=$(sed -n 's/^Token : //p' <<< "$OUT")
-            [[ -n "$TOKEN" ]] || { echo "pfctl -E returned no token: $OUT" >&2; exit 1; }
+            [[ -n "$TOKEN" ]] \
+                || { pf -a "$ANCHOR" -F all >/dev/null || true; echo "pfctl -E returned no token: $OUT" >&2; exit 1; }
             mkdir -p "$(dirname "$TOKEN_FILE")"
-            ( umask 077; echo "$TOKEN" > "$TOKEN_FILE" )
+            if ! ( umask 077; echo "$TOKEN" > "$TOKEN_FILE" ); then
+                pf -X "$TOKEN" >/dev/null || true
+                pf -a "$ANCHOR" -F all >/dev/null || true
+                echo "cannot write $TOKEN_FILE; PF reference released" >&2
+                exit 1
+            fi
         fi
         echo "$(date '+%F %T') start: rules loaded into $ANCHOR, PF reference held"
         ;;
@@ -510,9 +520,16 @@ _pf_legacy_cleanup() {
         sudo install -m 644 -o root -g wheel "$TMP_CONF" "$PF_CONF" \
             || { rm -f "$TMP_CONF"; die "Failed to install ${PF_CONF}"; }
         rm -f "$TMP_CONF"
-        # One reload is unavoidable here: it drops the old anchor from the main ruleset
-        sudo pfctl -f "$PF_CONF" 2>/dev/null \
-            || warn "PF reload failed — check: sudo pfctl -nf ${PF_CONF}"
+        # The reload replaces the whole main ruleset, so a VPN kill switch loaded
+        # there is dropped too. Ask first; declining keeps the main ruleset as it is.
+        warn "Reloading the main PF ruleset replaces every rule in it, including a VPN kill switch's."
+        ask "Reload the main PF ruleset now?" CONFIRM_RELOAD
+        if [[ "$CONFIRM_RELOAD" == "y" || "$CONFIRM_RELOAD" == "Y" ]]; then
+            sudo pfctl -f "$PF_CONF" 2>/dev/null \
+                || warn "PF reload failed — check: sudo pfctl -nf ${PF_CONF}"
+        else
+            warn "Reload skipped. The old anchor stays in the main ruleset until the next PF reload or reboot."
+        fi
         log "  [✓] ${PF_CONF} restored (backup saved next to it)"
         info "Older versions enabled PF with 'pfctl -e'; it stays on. If nothing else uses PF: sudo pfctl -d"
     fi
@@ -1090,9 +1107,10 @@ verify_dns_stack() {
 # ──────────────────────────────────────────
 reset_net_hardening() {
     log "Resetting network hardening (PF DNS lock, Privoxy toggle, hosts blocklist)..."
-    disable_pf_dns_lock
-    disable_privoxy_autoswitch   # also turns system web proxies off
-    disable_hosts_blocklist
+    # Each step runs in a subshell: a die in one must not skip the others
+    ( disable_pf_dns_lock ) || warn "PF DNS lock step failed; continuing with the rest."
+    ( disable_privoxy_autoswitch ) || warn "Privoxy step failed; continuing."   # also turns system web proxies off
+    ( disable_hosts_blocklist ) || warn "hosts blocklist step failed; continuing."
     log "Network hardening reset complete."
 }
 
@@ -1165,7 +1183,7 @@ main() {
             1)
                 log "[1] PF DNS leak lock"
                 prepare_pf_dns_lock_anchor
-                enable_pf_dns_lock
+                enable_pf_dns_lock || warn "PF DNS lock was not enabled."
                 echo ""
                 ;;
             2)

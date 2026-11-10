@@ -66,6 +66,22 @@ chk "enable: no status poll loop left" '! grep -q "sleep 0.5" "$T/enable.fn"'
 chk "disable: anchor flushed before the helper re-install" \
     '[[ "$(grep -n "F all" "$T/disable.fn" | head -1 | cut -d: -f1)" -lt "$(grep -n "_install_pf_helper" "$T/disable.fn" | head -1 | cut -d: -f1)" ]]'
 
+echo "== v0.17.4 static fixes (audit F10-F16)"
+awk "/<<'HELPER'\$/{f=1;next} /^HELPER\$/{f=0} f" "$REPO/mac-hardening-netlib.sh" > "$T/helper.sh"
+chk "helper parses" '/bin/bash -n "$T/helper.sh"'
+chk "helper flushes the anchor on every start failure (F11)" \
+    '[[ "$(grep -c "pf -a \"\$ANCHOR\" -F all" "$T/helper.sh")" -ge 4 ]]'
+chk "helper releases the reference if the token cannot be saved (F12)" \
+    'grep -q "cannot write \$TOKEN_FILE; PF reference released" "$T/helper.sh"'
+chk "anchor install failure removes its temp file (F15)" \
+    'grep -q "rm -f \"\$TMP\"; die \"Failed to install PF anchor" "$REPO/mac-hardening-netlib.sh"'
+chk "menu and vpn_daily guard enable_pf_dns_lock (F13)" \
+    'grep -q "enable_pf_dns_lock || warn" "$REPO/mac-hardening-netlib.sh" && grep -q "enable_pf_dns_lock || warn" "$REPO/vpn_daily.sh"'
+chk "reset runs each step in a subshell (F16)" \
+    'grep -q "( disable_pf_dns_lock )" "$REPO/mac-hardening-netlib.sh" && grep -q "( disable_hosts_blocklist )" "$REPO/mac-hardening-netlib.sh"'
+chk "legacy pf.conf reload asks first (F10)" \
+    'grep -q "Reload the main PF ruleset now" "$REPO/mac-hardening-netlib.sh"'
+
 echo "== restore.sh teardown (v0.17.4, audit F1)"
 awk "/<<'RESTORE'\$/{f=1;next} /^RESTORE\$/{f=0} f" "$REPO/mac-hardening-netlib.sh" > "$T/restore.sh"
 chk "restore.sh parses" '/bin/bash -n "$T/restore.sh"'

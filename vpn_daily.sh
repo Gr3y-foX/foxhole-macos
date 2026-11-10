@@ -71,7 +71,7 @@ main() {
       1)
         log "[1] Enable PF DNS lock"
         prepare_pf_dns_lock_anchor
-        enable_pf_dns_lock
+        enable_pf_dns_lock || warn "PF DNS lock was not enabled."
         echo ""
         ;;
 
