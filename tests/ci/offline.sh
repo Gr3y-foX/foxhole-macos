@@ -57,6 +57,15 @@ chk "ask: default N without a tty" '[[ "$(ask q ANS </dev/null >/dev/null 2>&1; 
 chk "ask: FOXHOLE_ASSUME_YES=1 answers y" '[[ "$(FOXHOLE_ASSUME_YES=1 ask q ANS </dev/null >/dev/null 2>&1; echo "$ANS")" == y ]]'
 chk "no eval in the netlib" '! grep -nE "(^|[^a-z_])eval " "$REPO/mac-hardening-netlib.sh" | grep -v "^[0-9]*:[[:space:]]*#"'
 
+echo "== PF lock enable/disable order (v0.17.4)"
+sed -n '/^enable_pf_dns_lock() {/,/^}/p' "$REPO/mac-hardening-netlib.sh" > "$T/enable.fn"
+sed -n '/^disable_pf_dns_lock() {/,/^}/p' "$REPO/mac-hardening-netlib.sh" > "$T/disable.fn"
+chk "enable: synchronous start precedes the boot daemon install" \
+    '[[ "$(grep -n "helper\" start" "$T/enable.fn" | head -1 | cut -d: -f1)" -lt "$(grep -n "_install_pf_launchdaemon" "$T/enable.fn" | head -1 | cut -d: -f1)" ]]'
+chk "enable: no status poll loop left" '! grep -q "sleep 0.5" "$T/enable.fn"'
+chk "disable: anchor flushed before the helper re-install" \
+    '[[ "$(grep -n "F all" "$T/disable.fn" | head -1 | cut -d: -f1)" -lt "$(grep -n "_install_pf_helper" "$T/disable.fn" | head -1 | cut -d: -f1)" ]]'
+
 echo "== no stale design"
 chk "no dnscrypt-proxy formula in the installer" '! grep -q "\"dnscrypt-proxy\"" "$REPO/mac-hardening-install.sh"'
 chk "installer does not run the Tor profile stub" '! grep -q "bash \"\$SCRIPT_DIR/profile-paranoid-tor.sh\"" "$REPO/mac-hardening-install.sh"'

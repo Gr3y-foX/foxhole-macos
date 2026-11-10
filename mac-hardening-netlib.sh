@@ -4,7 +4,7 @@ set -euo pipefail
 # Foxhole-macos — macOS Network Hardening Library
 #
 # File:    mac-hardening-netlib.sh
-# Version: 0.17.3 (2026-11-03)
+# Version: 0.17.4 (2026-11-10)
 # Author:  Gr3y-foX
 # Based on: drduh/macOS-Security-and-Privacy-Guide (MIT)
 # License: GNU GPL v3 — see LICENSE for details
@@ -525,20 +525,27 @@ enable_pf_dns_lock() {
     fi
 
     _install_pf_helper
-    _install_pf_launchdaemon    # RunAtLoad: runs "helper start" now and at every boot
 
-    local _
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-        sudo /bin/bash "$PF_LOCK_HELPER" status && break
-        sleep 0.5
-    done
-    if sudo /bin/bash "$PF_LOCK_HELPER" status; then
-        log "PF DNS lock: ACTIVE ✓ (anchor ${PF_LOCK_ANCHOR})"
-    else
+    # Start synchronously and check the result before the boot daemon exists, so a
+    # failed start cannot leave a plist that turns the lock on at the next boot.
+    if ! sudo /bin/bash "$PF_LOCK_HELPER" start >/dev/null \
+       || ! sudo /bin/bash "$PF_LOCK_HELPER" status >/dev/null; then
         err "PF DNS lock did not come up. Log: /var/log/foxhole-pf.log"
         sudo tail -n 5 /var/log/foxhole-pf.log 2>/dev/null || true
+        sudo /bin/bash "$PF_LOCK_HELPER" stop >/dev/null 2>&1 || true
         return 1
     fi
+
+    # Boot persistence. Its RunAtLoad "start" finds the token held and only reloads
+    # the anchor. If the daemon cannot be installed, roll the lock back.
+    if ! _install_pf_launchdaemon; then
+        err "PF DNS lock: boot daemon could not be installed; rolling back."
+        _launchd_bootout "$PF_LOCK_LABEL"
+        sudo rm -f "$PF_LOCK_PLIST"
+        sudo /bin/bash "$PF_LOCK_HELPER" stop >/dev/null 2>&1 || true
+        return 1
+    fi
+    log "PF DNS lock: ACTIVE ✓ (anchor ${PF_LOCK_ANCHOR})"
 }
 
 _install_pf_launchdaemon() {
@@ -581,6 +588,9 @@ disable_pf_dns_lock() {
 
     _launchd_bootout "$PF_LOCK_LABEL"
     sudo rm -f "$PF_LOCK_PLIST"
+
+    # Flush before anything below can fail: the block rules must not outlive a failed disable
+    sudo pfctl -a "$PF_LOCK_ANCHOR" -F all >/dev/null 2>&1 || true
 
     # Re-install first so the current stop logic runs even if the helper is missing
     _install_pf_helper
