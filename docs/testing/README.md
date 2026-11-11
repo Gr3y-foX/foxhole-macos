@@ -11,6 +11,6 @@ The scripts change live system state (PF, `/etc/hosts`, proxies, LaunchDaemons),
 
 Environment variables: `FOXHOLE_VM_NET=bridged` (real internet in the VM), `FOXHOLE_VM_BASE=foxhole-brew` (start from the image with Homebrew; enables the real Privoxy test T18 and the real WireGuard test T19), `FOXHOLE_ASSUME_YES=1` and `FOXHOLE_DNS_MODE=doh|vpn|plain` (unattended runs).
 
-Each run saves its log to [`logs/`](logs/). Latest result: [`reports/vm-test-report-2026-11-04.md`](reports/vm-test-report-2026-11-04.md) (125 passed / 0 failed / 0 skipped on the Homebrew image). Earlier report: [`reports/vm-test-report-2026-11-03.md`](reports/vm-test-report-2026-11-03.md); its logs sit in [`logs/`](logs/) with the `2026-11-03` prefix.
+Each run saves its log to [`logs/`](logs/). Latest result: [`reports/vm-test-report-2026-11-10.md`](reports/vm-test-report-2026-11-10.md) (v0.17.4: 167 passed / 0 failed / 0 skipped, plus 12 / 0 / 0 after a reboot, on the Homebrew image). `run.sh` reboots the VM after the main run and runs `vmtest.sh --after-reboot` (T26: the lock must come back by itself). Earlier reports: [`reports/vm-test-report-2026-11-04.md`](reports/vm-test-report-2026-11-04.md), [`reports/vm-test-report-2026-11-03.md`](reports/vm-test-report-2026-11-03.md); the latter's logs sit in [`logs/`](logs/) with the `2026-11-03` prefix.
 
 Not covered yet: real Mullvad side by side with the lock, a real DoH profile (the VM uses a plain-DNS Quad9 stand-in).

@@ -1,6 +1,20 @@
-# Checkpoint — 2026-11-04 night (resume here)
+# Checkpoint — 2026-11-11 (resume here)
 
 Read first: this file, then `SESSION_PLAN.md` (checkpoint list CP0–CP10), then `NEXT_SESSION.md` for background.
+
+## 2026-11-10: lockout audit and v0.17.4
+
+- Audit: brief `AUDIT_PF_LOCKOUT.md`, report `AUDIT_PF_LOCKOUT_REPORT.md` (17 findings, F1–F17).
+- **Branch `private-all`** (new, pushed to origin; the user wants all work to land there first, then be filtered to `debug` and later `main`). `debug` and `main` are still at `80f2847`; PR #1 is untouched. Note: a branch in the same GitHub repo is as visible as the repo itself.
+- v0.17.4 fixes F1–F6, F8, F10–F17: see `../changelog/v0.17.4.md`. Done 2026-11-11 (2nd round, backup tag `backup/pre-f7-toggle-2026-11-11`): F7 interface union (D2 revised by the user's go-ahead), proxy toggle moved to `/usr/local/libexec`, `private-all` merged into `debug` (updates PR #1). Open: **F9** (`quick` pass rules vs a VPN kill switch: needs real Mullvad). Done 2026-11-11: helper-directory ownership check, disable fallback, `update_hosts` root-owned staging and tolerant commit lookup.
+- VM: 167/0/0 plus 12/0/0 after a reboot (run of 2026-11-11, 2nd round) on the Homebrew image, `../testing/reports/vm-test-report-2026-11-10.md`. `run.sh` now has a reboot phase (T26). Offline 49/49.
+- One T17 failure in the first run of the day has no proven cause (report, "The earlier run today"). If "block rules and utun passes loaded" fails again right after an enable, read `/var/log/foxhole-pf.log` in the VM before anything else.
+- GitNexus CLI does not load on this Mac (x86_64 native module on arm64): callers were confirmed with `grep -rn`. Repair: `node /usr/local/lib/node_modules/gitnexus/node_modules/@ladybugdb/core/install.js`, then re-run `analyze`.
+- Next: decide F7; real Mullvad test for F9/F10; cherry-pick or merge `private-all` into `debug` when the user says so (that updates PR #1).
+
+---
+
+# Checkpoint — 2026-11-04 night
 
 ## State
 - Docs layout (reorganised 2026-11-05): `docs/changelog/` (release notes), `docs/testing/` (README, `reports/`, `logs/`), `docs/dev/` (these working notes, PR text, CLAUDE.md draft), `docs/archive/`. Index: `docs/README.md`. `tests/vm/run.sh` now writes logs to `docs/testing/logs/`.
@@ -12,7 +26,7 @@ Read first: this file, then `SESSION_PLAN.md` (checkpoint list CP0–CP10), then
 
 ## User decisions (CP2, answered 2026-11-04)
 - **D1:** make it configurable. DNS modes via `FOXHOLE_DNS_MODE` or a menu prompt: `doh` (default, Quad9 on tcp 443 only), `vpn` (no Quad9 exception, DNS only through the tunnel; the user's own Mullvad setup with Quad9 inside the VPN), `plain` (Quad9 any port, old behaviour).
-- **D2:** yes. Helper `start` re-renders the physical-interface list at boot, falls back to the rules file as written. Test in the VM before shipping; `create_net_backup` (writes `restore.sh`) is the safety net.
+- **D2:** yes. Helper `start` re-renders the physical-interface list at boot, falls back to the rules file as written. **Revised 2026-11-11 (F7):** union of the live list and the file's list. Test in the VM before shipping; `create_net_backup` (writes `restore.sh`) is the safety net.
 - **D3:** keep the `sudo pfctl -d` message, no auto-disable (my recommendation; user left it to me).
 - **D4:** done: `debug_netlib/` moved to `docs/archive/debug_netlib/`.
 - **R1:** remote already switched to `foxhole-macos` by the user.

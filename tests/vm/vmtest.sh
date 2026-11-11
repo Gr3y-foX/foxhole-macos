@@ -34,6 +34,33 @@ ntokens()  { pfq -s References | grep -cE '^[0-9]+ ' || true; }
 blk53()    { pfq -a "$A" -vsr | awk '/^block .* proto udp .* port = 53$/ {getline; for (i=1;i<=NF;i++) if ($i=="Packets:") s+=$(i+1)} END {print s+0}'; }
 same_conf(){ diff <(grep -v "^$" /etc/pf.conf) <(grep -v "^$" /tmp/pf.conf.baseline) >/dev/null; }
 
+# Phase 2 (run by run.sh after it rebooted the VM): phase 1 left the lock on
+if [[ "${1:-}" == "--after-reboot" ]]; then
+    echo "== T26 reboot with the lock on, no VPN (audit scenario A, F8)"
+    NET_OK=0
+    for _ in $(seq 1 30); do sudo bash $HELPER status >/dev/null 2>&1 && break; sleep 2; done
+    echo "  info: /var/log/foxhole-pf.log (tail):"; sudo tail -n 6 /var/log/foxhole-pf.log 2>&1 | sed "s/^/    /"
+    echo "  info: daemon: $(sudo launchctl print system/com.hardening.pf.dnsleak 2>&1 | grep -E "state =|last exit code" | tr -s " " | tr "\n" ";")"
+    chk "after reboot: helper status = active" 'sudo bash $HELPER status'
+    chk "after reboot: PF enabled, exactly one reference" 'pf_on && [[ "$(ntokens)" == 1 ]]'
+    chk "after reboot: main ruleset evaluates com.apple/*" 'pfq -sr | grep -qE "^anchor \"com\.apple/\*\""'
+    chk "after reboot: rules loaded (port 53 blocks, utun passes)" 'pfq -a $A -sr | grep -q "port = 53" && pfq -a $A -sr | grep -q "^pass .* on utun"'
+    chk "after reboot: the boot action logged a successful run" 'sudo grep -q "boot: rules loaded" /var/log/foxhole-pf.log'
+    chk "after reboot: no temp or pending files" '! ls /var/run/foxhole-pf.* >/dev/null 2>&1 && ! test -e $RULES.new && ! test -e $PLIST.new && ! test -e $HELPER.new'
+    pfq -a $A -z >/dev/null
+    dig +time=1 +tries=2 example.com @8.8.8.8 >/dev/null 2>&1
+    B=$(blk53); echo "  info: udp/53 block-rule packets after dig @8.8.8.8: $B"
+    chk "after reboot: DNS to 8.8.8.8 hits the block rule" '[[ "$B" -gt 0 ]]'
+    curl -s -o /dev/null --max-time 6 https://1.1.1.1/ && NET_OK=1
+    echo "  info: direct internet egress with the lock on: $([[ $NET_OK == 1 ]] && echo yes || echo NO)"
+    netchk "after reboot: HTTPS by IP works with the lock on (no IP lockout)" 'curl -s -o /dev/null --max-time 6 https://1.1.1.1/'
+    disable_pf_dns_lock >/dev/null 2>&1
+    chk "after reboot: disable leaves PF off and no leftovers" '! pf_on && ! test -e $RULES && ! test -e $HELPER && ! test -e $PLIST && ! sudo test -e $TOKEN'
+    echo
+    echo "RESULT (after reboot): ${PASS} passed, ${FAIL} failed, ${SKIP} skipped"
+    exit 0
+fi
+
 echo "== T1 baseline"
 sudo cp /etc/pf.conf /tmp/pf.conf.baseline
 pfq -sr > /tmp/pf.main.baseline
@@ -48,10 +75,14 @@ echo "  info: direct internet egress: $([[ $NET_OK == 1 ]] && echo yes || echo N
 
 echo "== T2 prepare + enable"
 prepare_pf_dns_lock_anchor 2>&1 | sed 's/\x1b\[[0-9;]*m//g'
-chk "rules file exists" 'test -f $RULES'
-chk "rules syntax ok (pfctl -nf)" 'sudo pfctl -nf $RULES 2>/dev/null'
-chk "block rules scoped (on {)" 'grep -q "^block out quick on {" $RULES'
+# v0.17.4: prepare writes $RULES.new; enable moves it into place after the confirmation
+chk "prepared rules file exists, live rules file not written yet" 'test -f $RULES.new && ! test -e $RULES'
+chk "prepared rules root:wheel 644" '[[ "$(stat -f "%Su:%Sg %Lp" $RULES.new)" == "root:wheel 644" ]]'
+chk "rules syntax ok (pfctl -nf)" 'sudo pfctl -nf $RULES.new 2>/dev/null'
+chk "block rules scoped (on {)" 'grep -q "^block out quick on {" $RULES.new'
 enable_pf_dns_lock 2>&1 | sed 's/\x1b\[[0-9;]*m//g'
+chk "enable promoted the prepared rules (rules file root:wheel 644, no .new left)" 'test -f $RULES && ! test -e $RULES.new && [[ "$(stat -f "%Su:%Sg %Lp" $RULES)" == "root:wheel 644" ]]'
+chk "plist root:wheel 644, runs the boot action, no staging files left" '[[ "$(stat -f "%Su:%Sg %Lp" $PLIST)" == "root:wheel 644" ]] && grep -q "<string>boot</string>" $PLIST && ! test -e $PLIST.new && ! test -e $HELPER.new && ! ls /tmp/foxhole-pf-* /tmp/pf.anchor.* >/dev/null 2>&1'
 chk "pf.conf untouched" 'same_conf && cmp -s /etc/pf.conf /tmp/pf.conf.baseline'
 chk "main ruleset untouched" 'diff <(pfq -sr) /tmp/pf.main.baseline >/dev/null'
 chk "rules loaded in $A (port 53)" 'pfq -a $A -sr | grep -q "port = 53"'
@@ -104,6 +135,7 @@ netchk "plain DNS @8.8.8.8 works again" 'dig +time=4 +tries=1 +short example.com
 
 echo "== T7 migration from a pre-0.17.3 install (pf.conf marker + com.hardening.dnsleak)"
 prepare_pf_dns_lock_anchor >/dev/null 2>&1
+sudo cp $RULES.new $RULES   # old versions wrote the live rules file directly; pf.conf loads the legacy anchor from it
 printf '\n# ===== hardening dns lock =====\nanchor "com.hardening.dnsleak"\nload anchor "com.hardening.dnsleak" from "/etc/pf.anchors/com.hardening.dnsleak"\n' | sudo tee -a /etc/pf.conf >/dev/null
 sudo pfctl -f /etc/pf.conf >/dev/null 2>&1
 chk "legacy anchor active before migration" 'pfq -a com.hardening.dnsleak -sr | grep -q "port = 53"'
@@ -123,6 +155,7 @@ enable_pf_dns_lock > /tmp/guard.out 2>&1; RC=$?
 sed 's/\x1b\[[0-9;]*m//g' /tmp/guard.out | grep -E "✗|i\]" | head -3
 chk "enable refuses (rc != 0)" '[[ $RC -ne 0 ]]'
 chk "no daemon installed on refusal" '! test -e $PLIST'
+chk "refusal drops the prepared rules, nothing loaded, PF not referenced" '! test -e $RULES.new && ! pfq -a $A -sr | grep -q . && [[ "$(ntokens)" == 0 ]]'
 sudo pfctl -f /etc/pf.conf >/dev/null 2>&1
 sudo rm -f $RULES
 chk "stock main ruleset restored" 'diff <(pfq -sr) /tmp/pf.main.baseline >/dev/null'
@@ -153,6 +186,10 @@ else
     chk "health check: all 10 pass" 'echo "$OUT" | grep -q "Results: 10/10 passed, 0 failed"'
     update_hosts >/tmp/hosts2.out 2>&1
     chk "hosts: second update keeps one marker" '[[ "$(grep -cF "# ===== StevenBlack Blocklist =====" /etc/hosts)" == 1 ]]'
+    # set -e as in the real scripts: the commit lookup is informational and must not end the run
+    ( set -e; curl() { case "$*" in *api.github.com*) return 22 ;; *) command curl "$@" ;; esac; }; update_hosts ) >/tmp/hosts3.out 2>&1; RC=$?
+    chk "hosts: update completes when the GitHub commit lookup fails" '[[ $RC -eq 0 ]] && grep -q "Latest GitHub commit: unknown" /tmp/hosts3.out && grep -q "/etc/hosts updated" /tmp/hosts3.out && [[ "$(grep -cF "# ===== StevenBlack Blocklist =====" /etc/hosts)" == 1 ]]'
+    chk "hosts: root-owned staging copy removed, blocklist still complete" '! sudo test -e /etc/hosts.foxhole.download && [[ "$(grep -c "^0\.0\.0\.0" /etc/hosts)" -gt 1000 ]]'
     reset_net_hardening >/dev/null 2>&1
     sudo networksetup -setdnsservers "$SVC" Empty
     chk "reset: blocklist and lock gone" '! grep -qF "StevenBlack Blocklist" /etc/hosts && ! sudo bash $HELPER status'
@@ -189,12 +226,14 @@ echo "== T13 Privoxy auto-switch: real proxy-toggle.sh + LaunchDaemon + networks
 SVC=$(networksetup -listallnetworkservices | tail -n +2 | grep -v '^\*' | head -1)
 wproxy() { networksetup -getwebproxy "$SVC" | awk -F': ' '$1=="Enabled"{print $2}'; }
 sproxy() { networksetup -getsecurewebproxy "$SVC" | awk -F': ' '$1=="Enabled"{print $2}'; }
-toggle() { sudo bash /usr/local/bin/proxy-toggle.sh; }
+toggle() { sudo bash /usr/local/libexec/proxy-toggle.sh; }
+sudo mkdir -p /usr/local/bin; echo '# old v0.17.3 toggle' | sudo tee /usr/local/bin/proxy-toggle.sh >/dev/null
 fake_privoxy() { perl -MIO::Socket::INET -e '$s=IO::Socket::INET->new(LocalAddr=>"127.0.0.1",LocalPort=>8118,Listen=>5,ReuseAddr=>1) or die; alarm 900; while ($c=$s->accept) { close $c }' >/dev/null 2>&1 & }
 fake_privoxy
 LPID=$!; sleep 1
 enable_privoxy_vpn_autoswitch 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | grep -E "✗|\[!\]|loopback|exposed|not listening|loaded"
-chk "toggle script root:wheel 755" '[[ "$(stat -f "%Su:%Sg %Lp" /usr/local/bin/proxy-toggle.sh)" == "root:wheel 755" ]]'
+chk "toggle script root:wheel 755" '[[ "$(stat -f "%Su:%Sg %Lp" /usr/local/libexec/proxy-toggle.sh)" == "root:wheel 755" ]]'
+chk "toggle moved: plist runs /usr/local/libexec, old /usr/local/bin copy removed, no .new left" 'grep -q "<string>/usr/local/libexec/proxy-toggle.sh</string>" /Library/LaunchDaemons/com.hardening.proxytoggle.plist && ! test -e /usr/local/bin/proxy-toggle.sh && ! test -e /usr/local/libexec/proxy-toggle.sh.new'
 chk "daemon bootstrapped" 'sudo launchctl print system/com.hardening.proxytoggle >/dev/null 2>&1'
 sleep 8   # the daemon re-runs once after its own proxy changes (WatchPath, ThrottleInterval 5)
 chk "no VPN + Privoxy listening -> web and secure web proxy ON" '[[ "$(wproxy)" == Yes && "$(sproxy)" == Yes ]]'
@@ -213,7 +252,7 @@ LPID=$!; sleep 1; toggle
 chk "Privoxy back -> proxy ON again" '[[ "$(wproxy)" == Yes ]]'
 disable_privoxy_autoswitch >/dev/null 2>&1
 kill $LPID 2>/dev/null; wait $LPID 2>/dev/null
-chk "disable: daemon, plist and script gone" '! sudo launchctl print system/com.hardening.proxytoggle >/dev/null 2>&1 && ! test -e /Library/LaunchDaemons/com.hardening.proxytoggle.plist && ! test -e /usr/local/bin/proxy-toggle.sh'
+chk "disable: daemon, plist and script gone" '! sudo launchctl print system/com.hardening.proxytoggle >/dev/null 2>&1 && ! test -e /Library/LaunchDaemons/com.hardening.proxytoggle.plist && ! test -e /usr/local/libexec/proxy-toggle.sh'
 chk "disable: system proxies OFF" '[[ "$(wproxy)" == No && "$(sproxy)" == No ]]'
 
 echo "== T15 installer fixes (functions extracted from mac-hardening-install.sh; needs egress)"
@@ -291,7 +330,8 @@ REAL_IF=$(networksetup -listallhardwareports | awk '/^Device: en[0-9]+$/ {print 
 sudo sed -i '' -E 's/^(block out quick on \{)[^}]*(\} )/\1 en99 \2/' $RULES
 chk "rules file now carries a stale interface list (en99 only)" 'grep -q "^block out quick on { en99 }" $RULES'
 sudo bash $HELPER start >/dev/null 2>&1
-chk "helper start re-renders the interface list (real $REAL_IF scoped, stale en99 gone)" 'pfq -a $A -sr | grep "port = 53" | grep -q "$REAL_IF" && ! pfq -a $A -sr | grep -q en99'
+# v0.17.4 (audit F7): the loaded list is the union of the live list and the file's list
+chk "helper start merges the interface list (real $REAL_IF added, en99 from the file kept)" 'pfq -a $A -sr | grep "port = 53" | grep -q "$REAL_IF" && pfq -a $A -sr | grep "port = 53" | grep -q en99'
 chk "re-render does not touch the rules file on disk" 'grep -q "^block out quick on { en99 }" $RULES'
 ls -la /var/run/foxhole-pf.* 2>&1 | sed "s/^/  info: /"
 chk "re-render leaves no temp files behind" '! ls /var/run/foxhole-pf.* >/dev/null 2>&1'
@@ -322,11 +362,11 @@ else
     enable_privoxy_vpn_autoswitch >/tmp/t18-auto.out 2>&1
     sleep 8
     chk "real Privoxy + no VPN -> proxies ON" '[[ "$(networksetup -getwebproxy "$SVC" | awk -F": " "\$1==\"Enabled\"{print \$2}")" == Yes ]]'
-    sudo ifconfig utun3 inet 10.99.0.1 10.99.0.2 netmask 255.255.255.255 up; sudo bash /usr/local/bin/proxy-toggle.sh
+    sudo ifconfig utun3 inet 10.99.0.1 10.99.0.2 netmask 255.255.255.255 up; sudo bash /usr/local/libexec/proxy-toggle.sh
     chk "real Privoxy + VPN up -> proxies OFF" '[[ "$(networksetup -getwebproxy "$SVC" | awk -F": " "\$1==\"Enabled\"{print \$2}")" == No ]]'
     sudo ifconfig utun3 inet 10.99.0.1 delete
     disable_privoxy_autoswitch >/dev/null 2>&1
-    chk "disable: proxies OFF and toggle gone" '[[ "$(networksetup -getwebproxy "$SVC" | awk -F": " "\$1==\"Enabled\"{print \$2}")" == No ]] && ! test -e /usr/local/bin/proxy-toggle.sh'
+    chk "disable: proxies OFF and toggle gone" '[[ "$(networksetup -getwebproxy "$SVC" | awk -F": " "\$1==\"Enabled\"{print \$2}")" == No ]] && ! test -e /usr/local/libexec/proxy-toggle.sh'
     pkill -x privoxy 2>/dev/null; brew services stop privoxy >/dev/null 2>&1
 fi
 
@@ -368,6 +408,93 @@ else
     chk "T19 cleanup: PF off, no leftovers" '! pf_on && ! test -e $RULES'
 fi
 
+echo "== T20 disable still unlocks when the helper re-install fails (audit F2)"
+prepare_pf_dns_lock_anchor >/dev/null 2>&1; enable_pf_dns_lock >/dev/null 2>&1
+chk "T20 setup: lock active" 'sudo bash $HELPER status'
+# Since the helper-directory check, disable no longer aborts here: it releases the reference itself
+( set -e; _install_pf_helper() { die "simulated helper install failure"; }; disable_pf_dns_lock ) > /tmp/t20.out 2>&1; RC=$?
+chk "disable completes although the helper install failed" '[[ $RC -eq 0 ]] && grep -q "simulated helper install failure" /tmp/t20.out && grep -q "releasing the PF reference directly" /tmp/t20.out && grep -q "PF DNS lock removed" /tmp/t20.out'
+chk "block rules flushed, PF off, no reference left" '! pfq -a $A -sr | grep -q . && ! pf_on && [[ "$(ntokens)" == 0 ]]'
+chk "boot daemon and plist gone" '! test -e $PLIST && ! sudo launchctl print system/com.hardening.pf.dnsleak >/dev/null 2>&1'
+chk "no leftovers (rules, helper, token)" '! test -e $RULES && ! test -e $HELPER && ! sudo test -e $TOKEN'
+
+echo "== T27 helper directory must be root-only writable"
+sudo chown admin /usr/local/libexec
+prepare_pf_dns_lock_anchor >/dev/null 2>&1
+( set -e; enable_pf_dns_lock ) > /tmp/t27.out 2>&1; RC=$?
+sed 's/\x1b\[[0-9;]*m//g' /tmp/t27.out | grep "✗" | head -2
+chk "user-owned helper directory: enable refuses and names the fix" '[[ $RC -ne 0 ]] && grep -q "is not root-only writable" /tmp/t27.out && grep -q "sudo chown root:wheel /usr/local/libexec" /tmp/t27.out'
+chk "refusal: no helper, no plist, no rules loaded, PF off" '! test -e $HELPER && ! test -e $HELPER.new && ! test -e $PLIST && ! pfq -a $A -sr | grep -q . && ! pf_on'
+sudo chown root:wheel /usr/local/libexec; sudo chmod 775 /usr/local/libexec
+( set -e; enable_pf_dns_lock ) > /tmp/t27b.out 2>&1; RC=$?
+chk "group-writable helper directory: enable refuses" '[[ $RC -ne 0 ]] && grep -q "is not root-only writable" /tmp/t27b.out && ! pf_on'
+sudo chmod 755 /usr/local/libexec
+enable_pf_dns_lock >/dev/null 2>&1
+chk "root:wheel 755 directory: enable works" 'sudo bash $HELPER status'
+disable_pf_dns_lock >/dev/null 2>&1
+chk "T27 cleanup: PF off, no leftovers" '! pf_on && ! test -e $RULES && ! test -e $HELPER'
+
+echo "== T21 failed enable rolls back to 'lock off' (audit F3, F11)"
+prepare_pf_dns_lock_anchor >/dev/null 2>&1
+( _launchd_bootstrap() { return 1; }; enable_pf_dns_lock ) > /tmp/t21.out 2>&1; RC=$?
+sed 's/\x1b\[[0-9;]*m//g' /tmp/t21.out | grep -E "✗|!\]" | head -3
+chk "bootstrap failure: enable returns non-zero and says it rolled back" '[[ $RC -ne 0 ]] && grep -q "rolled back" /tmp/t21.out && ! grep -q "ACTIVE" /tmp/t21.out'
+chk "bootstrap failure: no plist, no job (nothing turns the lock on at boot)" '! test -e $PLIST && ! test -e $PLIST.new && ! sudo launchctl print system/com.hardening.pf.dnsleak >/dev/null 2>&1'
+chk "bootstrap failure: no rules loaded, PF off, no reference" '! pfq -a $A -sr | grep -q . && ! pf_on && [[ "$(ntokens)" == 0 ]]'
+disable_pf_dns_lock >/dev/null 2>&1
+echo "this is not a pf rule" | sudo tee $RULES.new >/dev/null
+enable_pf_dns_lock > /tmp/t21b.out 2>&1; RC=$?
+chk "unloadable rules: enable returns non-zero" '[[ $RC -ne 0 ]] && grep -q "did not come up" /tmp/t21b.out'
+chk "unloadable rules: no plist, no rules loaded, PF off, no reference" '! test -e $PLIST && ! pfq -a $A -sr | grep -q . && ! pf_on && [[ "$(ntokens)" == 0 ]]'
+OTHER=$(sudo pfctl -E 2>&1 | sed -n "s/^Token : //p")
+echo "this is not a pf rule" | sudo tee $RULES.new >/dev/null
+enable_pf_dns_lock >/dev/null 2>&1
+chk "unloadable rules with another PF holder: anchor empty, the other reference untouched" '! pfq -a $A -sr | grep -q . && pf_on && [[ "$(ntokens)" == 1 ]]'
+sudo pfctl -X "$OTHER" >/dev/null 2>&1
+disable_pf_dns_lock >/dev/null 2>&1
+chk "T21 cleanup: PF off, no leftovers" '! pf_on && ! test -e $RULES && ! test -e $RULES.new && ! test -e $HELPER'
+
+echo "== T22 restore.sh removes the lock (audit F1)"
+create_net_backup > /dev/null 2>&1
+BK=$(ls -d "$HOME"/.foxhole/backups/* | tail -1)
+prepare_pf_dns_lock_anchor >/dev/null 2>&1; enable_pf_dns_lock >/dev/null 2>&1
+chk "T22 setup: lock active" 'sudo bash $HELPER status'
+pfq -sr > /tmp/pf.main.t22
+# shellcheck disable=SC2024  # the redirect target is a user-owned /tmp file
+sudo bash $BK/restore.sh > /tmp/t22-restore.out 2>&1; RR=$?
+chk "restore.sh exits 0 and reports the lock removed" '[[ $RR -eq 0 ]] && grep -q "PF DNS lock removed" /tmp/t22-restore.out'
+chk "restore: rules flushed, PF off, no reference" '! pfq -a $A -sr | grep -q . && ! pf_on && [[ "$(ntokens)" == 0 ]]'
+chk "restore: plist and job gone (lock does not return at boot)" '! test -e $PLIST && ! sudo launchctl print system/com.hardening.pf.dnsleak >/dev/null 2>&1'
+chk "restore: helper, rules and token files gone" '! test -e $HELPER && ! test -e $RULES && ! sudo test -e $TOKEN'
+chk "restore: main ruleset not reloaded or changed" 'diff <(pfq -sr) /tmp/pf.main.t22 >/dev/null'
+netchk "restore: plain DNS @8.8.8.8 works again" 'dig +time=4 +tries=1 +short example.com @8.8.8.8 2>/dev/null | grep -q "[0-9]"'
+rm -rf "$HOME/.foxhole"
+
+echo "== T23 mode switch: declined switch changes nothing, direct switch replaces the rules (audit F4, F5, G)"
+FOXHOLE_DNS_MODE=plain prepare_pf_dns_lock_anchor >/dev/null 2>&1; enable_pf_dns_lock >/dev/null 2>&1
+FOXHOLE_DNS_MODE=vpn prepare_pf_dns_lock_anchor >/dev/null 2>&1
+( ask() { printf -v "$2" '%s' 'N'; }; enable_pf_dns_lock ) >/dev/null 2>&1
+chk "declined switch: rules file still says plain, prepared file dropped" 'grep -q "^# DNS policy: plain" $RULES && ! test -e $RULES.new'
+sudo launchctl kickstart -k system/com.hardening.pf.dnsleak >/dev/null 2>&1; sleep 3
+chk "declined switch: a daemon re-run (as at boot) still loads plain" 'pfq -a $A -sr | grep "to 9\.9\.9\.9" | grep -qv "port = 443" && sudo bash $HELPER status'
+FOXHOLE_DNS_MODE=vpn prepare_pf_dns_lock_anchor >/dev/null 2>&1; enable_pf_dns_lock >/dev/null 2>&1
+chk "direct switch plain -> vpn (no disable): no Quad9 rule left in the kernel" '! pfq -a $A -sr | grep -q "9\.9\.9\."'
+chk "direct switch: lock active, still exactly one reference, daemon bootstrapped" 'sudo bash $HELPER status && [[ "$(ntokens)" == 1 ]] && sudo launchctl print system/com.hardening.pf.dnsleak >/dev/null 2>&1'
+
+echo "== T24 helper status and boot action (audit F8)"
+echo "pass all" | sudo pfctl -f - >/dev/null 2>&1
+chk "status fails when the main ruleset has no com.apple/* anchor (lock inert)" '! sudo bash $HELPER status'
+sudo pfctl -f /etc/pf.conf >/dev/null 2>&1
+chk "status is ok again once the stock main ruleset is back" 'sudo bash $HELPER status'
+sudo bash $HELPER boot >/dev/null 2>&1; RC=$?
+chk "boot action is idempotent: rc 0, still one reference" '[[ $RC -eq 0 ]] && [[ "$(ntokens)" == 1 ]] && sudo bash $HELPER status'
+
+echo "== T25 reset continues past a failed step (audit F16)"
+( disable_pf_dns_lock() { die "simulated PF step failure"; }; reset_net_hardening ) > /tmp/t25.out 2>&1
+chk "reset reports the failed step and still completes" 'grep -q "PF DNS lock step failed" /tmp/t25.out && grep -q "Network hardening reset complete" /tmp/t25.out'
+reset_net_hardening >/dev/null 2>&1
+chk "T25 cleanup: PF off, no leftovers" '! pf_on && ! test -e $RULES && ! test -e $HELPER && ! test -e $PLIST'
+
 echo "== T10 vpn_daily.sh menu from another cwd (driven by expect: ask() needs a tty)"
 cat > /tmp/vd.exp <<'EXP'
 set timeout 30
@@ -375,6 +502,7 @@ set env(TERM) xterm
 spawn bash /Users/admin/foxhole/vpn_daily.sh
 expect "Continue?*" { send "y\r" }
 expect "Password:" { send "admin\r" }
+expect "Create backup snapshot*" { send "y\r" }
 expect "Choice (1-6):" { send "4\r" }
 expect "Choice (1-6):" { send "1\r" }
 expect "Choice (1-3, Enter = 1):" { send "1\r" }
@@ -390,6 +518,14 @@ chk "vpn_daily [2] removes lock" 'grep -q "PF DNS lock removed" /tmp/vpn_daily.o
 chk "vpn_daily exits cleanly" 'grep -q "Done. For daily use" /tmp/vpn_daily.out'
 chk "no 'command not found' in vpn_daily output" '! grep -qi "command not found" /tmp/vpn_daily.out'
 chk "no leftovers after vpn_daily" '! grep -q dnsleak /etc/pf.conf && ! test -e $PLIST && ! pf_on'
+chk "vpn_daily took a backup snapshot with restore.sh (audit F17)" 'ls "$HOME"/.foxhole/backups/*/restore.sh >/dev/null 2>&1'
+rm -rf "$HOME/.foxhole"
+
+echo "== T26 setup: leave the lock on (doh) for the reboot phase"
+echo "  info: helper log lines that are not a plain start/boot/stop (expected: only the simulated failures of T21/T24):"
+sudo grep -v -e "rules loaded into" -e "rules flushed" /var/log/foxhole-pf.log 2>/dev/null | tail -12 | sed "s/^/    /"
+FOXHOLE_DNS_MODE=doh prepare_pf_dns_lock_anchor >/dev/null 2>&1; enable_pf_dns_lock >/dev/null 2>&1
+chk "lock active before the reboot" 'sudo bash $HELPER status && test -e $PLIST'
 
 echo
 echo "RESULT: ${PASS} passed, ${FAIL} failed, ${SKIP} skipped"
