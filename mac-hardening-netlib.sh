@@ -1,28 +1,65 @@
 #!/bin/bash
+set -euo pipefail
 #
 # Foxhole-macos — macOS Network Hardening Library
 #
 # File:    mac-hardening-netlib.sh
-# Version: 0.15 (2026)
+# Version: 0.17.4 (2026-11-10)
 # Author:  Gr3y-foX
 # Based on: drduh/macOS-Security-and-Privacy-Guide (MIT)
 # License: GNU GPL v3 — see LICENSE for details
 #
 # Overview:
-#   Reusable network hardening primitives for macOS:
-#     - dnscrypt-proxy (encrypted DNS as user-level service)
-#     - PF DNS leak lock anchors
+#   Network hardening primitives for macOS:
+#     - PF DNS leak prevention (VPN tunnels utun0-15 pass)
 #     - /etc/hosts blocklist (StevenBlack)
-#     - Privoxy with VPN‑aware auto‑proxy switching
+#     - Privoxy with VPN-aware auto-proxy switching
 #
 # Usage:
-#   This script is primarily intended to be sourced from profile scripts
-#   (e.g. profile-vpn-daily.sh), but can also be run directly to access
-#   its interactive menu.
+#   Source from profile scripts or run directly for interactive menu.
 #
-# Notes for v0.15:
-#   - Initial split of network logic into a dedicated netlib module
-#   - ARM / Apple Silicon aware paths and stricter error handling
+# v0.17.3 Highlights:
+#   • tunnel pass rule lists utun0-utun15: PF on macOS has no "utun+" wildcard
+#     (a block rule on utun+ matched nothing in the VM)
+#   • PF DNS lock lives in anchor com.apple/foxhole.dnsleak: /etc/pf.conf is
+#     no longer edited and the main ruleset no longer reloaded (VPN-safe)
+#   • PF enabled by reference (pfctl -E / -X): disable restores the old state
+#   • helper /usr/local/libexec/foxhole-pf-dnslock shared by enable/disable/boot
+#   • launchctl bootstrap/bootout instead of load/unload
+#   • old pf.conf marker installs are migrated automatically
+#   • DNS policy for the lock (FOXHOLE_DNS_MODE or a menu prompt): doh (default,
+#     Quad9 on tcp 443 only), vpn (no Quad9 exception, DNS only through the
+#     tunnel) or plain (Quad9 on any port, the old behaviour)
+#   • boot helper re-reads the physical interfaces, so a NIC added later is
+#     scoped too (falls back to the rules file as written)
+#
+# v0.17.2 Highlights:
+#   • disable_pf_dns_lock removes marker + anchor lines, keeps pf.conf root:wheel
+#   • PF block rules scoped to physical (en*) interfaces again
+#   • enable/verify read the anchor rules, not plain "pfctl -sr"
+#   • verify_dns_stack no longer aborts under "set -e"; no eval
+#   • proxy-toggle: VPN detection fixed ("(Disconnected)" matched), utun with IPv4
+#     tunnels detected, idempotent writes, never proxies to a dead Privoxy
+#   • update_hosts validates the download before editing /etc/hosts
+#
+# v0.17.1 Highlights:
+#   • Security fixes: shell injection, TOCTOU, XML injection
+#   • Reliability: strict mode, better error handling
+#   • Fixed VPN packet drops (utun0-9) with explicit pass rules
+#   • Removed dnscrypt-proxy (conflicts with macOS DoH profile)
+#   • DNS stack: macOS DoH Profile (Quad9) → PF anchor (leak lock)
+#   • PF anchor now scopes block rules to physical interfaces only
+
+# Constants
+# PRIVOXY_* are for profiles that source the netlib (proxy-toggle.sh hard-codes them)
+# shellcheck disable=SC2034
+readonly PRIVOXY_ADDR="127.0.0.1"
+# shellcheck disable=SC2034
+readonly PRIVOXY_PORT="8118"
+readonly QUAD9_PRIMARY="9.9.9.9"
+readonly QUAD9_SECONDARY="149.112.112.112"
+readonly QUAD9_ECS_PRIMARY="9.9.9.11"
+readonly QUAD9_ECS_SECONDARY="149.112.112.11"
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 RED='\033[0;31m';   CYAN='\033[0;36m'; NC='\033[0m'
@@ -30,85 +67,159 @@ log()  { echo -e "${GREEN}[+]${NC} $1"; }
 warn() { echo -e "${YELLOW}[!]${NC} $1"; }
 err()  { echo -e "${RED}[✗]${NC} $1"; }
 info() { echo -e "${CYAN}[i]${NC} $1"; }
-
-# Cancel with an error message
-die() { err "$1"; exit 1; }
+die()  { err "$1"; exit 1; }
 
 ask() {
     local PROMPT="$1" VAR="$2"
+    # Opt-in automation (tests, unattended runs): FOXHOLE_ASSUME_YES=1 answers every prompt "y"
+    if [[ "${FOXHOLE_ASSUME_YES:-0}" == "1" ]]; then
+        info "FOXHOLE_ASSUME_YES=1 — answering yes: $PROMPT"
+        printf -v "$VAR" '%s' 'y'
+        return 0
+    fi
     if [[ -t 0 ]]; then
+        # shellcheck disable=SC2229  # reads into the variable *named* by $VAR
         read -rp "    ${PROMPT} (y/N): " "$VAR"
     else
         warn "Non-interactive — skipping: $PROMPT"
-        eval "$VAR=N"
+       # Safe: use `printf -v` instead of `eval`
+        printf -v "$VAR" '%s' 'N'
     fi
 }
 
 # ──────────────────────────────────────────
-# BACKUP — Creating a snapshot before hardening
+# BACKUP — snapshot before hardening
 # ──────────────────────────────────────────
 NET_BACKUP_DIR="${HOME}/.foxhole/backups/$(date +%Y%m%d_%H%M%S)"
 
 create_net_backup() {
-  log "Creating pre-hardening backup snapshot..."
-  mkdir -p "$NET_BACKUP_DIR" \
-    || { warn "Cannot create backup dir: ${NET_BACKUP_DIR}"; return 1; }
+    log "Creating pre-hardening backup snapshot..."
+    mkdir -p "$NET_BACKUP_DIR" \
+        || { warn "Cannot create backup dir: ${NET_BACKUP_DIR}"; return 1; }
 
-  # 1. /etc/pf.conf
-  if [[ -f /etc/pf.conf ]]; then
-    sudo cp /etc/pf.conf "${NET_BACKUP_DIR}/pf.conf" \
-      && log "  [✓] /etc/pf.conf"
-  else
-    warn "  [–] /etc/pf.conf not found — skipped"
-  fi
+    # 1. /etc/pf.conf
+    if [[ -f /etc/pf.conf ]]; then
+        sudo cp /etc/pf.conf "${NET_BACKUP_DIR}/pf.conf" \
+            || die "Failed to backup /etc/pf.conf — aborting."
+        log "  [✓] /etc/pf.conf"
+    else
+        warn "  [–] /etc/pf.conf not found — skipped"
+    fi
 
-  # 2. /etc/hosts
-  if [[ -f /etc/hosts ]]; then
-    sudo cp /etc/hosts "${NET_BACKUP_DIR}/hosts" \
-      && log "  [✓] /etc/hosts"
-  else
-    warn "  [–] /etc/hosts not found — skipped"
-  fi
+    # 2. pf anchor (already exist)
+    [[ -f "$PF_LOCK_RULES" ]] \
+        && sudo cp "$PF_LOCK_RULES" "${NET_BACKUP_DIR}/pf.anchor.dnsleak" \
+        && log "  [✓] pf anchor"
 
-  # 3. System proxies (all network services)> 
-  local PROXY_DUMP="${NET_BACKUP_DIR}/network_proxies.txt"
-  {
-    echo "# Network proxy snapshot — $(date)"
-    echo "# Restore: networksetup -setwebproxy <service> <host> <port>"
+    # 3. /etc/hosts
+    if [[ -f /etc/hosts ]]; then
+        sudo cp /etc/hosts "${NET_BACKUP_DIR}/hosts" \
+            || die "Failed to backup /etc/hosts — aborting."
+        log "  [✓] /etc/hosts"
+    else
+        warn "  [–] /etc/hosts not found — skipped"
+    fi
+
+    # 4. /etc/resolv.conf
+    [[ -f /etc/resolv.conf ]] \
+        && sudo cp /etc/resolv.conf "${NET_BACKUP_DIR}/resolv.conf" \
+        && log "  [✓] /etc/resolv.conf"
+
+    # 5. System DNS resolver snapshot
+    scutil --dns > "${NET_BACKUP_DIR}/system-dns.txt" 2>/dev/null \
+        && log "  [✓] scutil --dns"
+
+    # 6. /etc/resolver/ directory (split DNS configurations)
+    if [[ -d /etc/resolver ]]; then
+        sudo cp -r /etc/resolver "${NET_BACKUP_DIR}/resolver" \
+            && log "  [✓] /etc/resolver/"
+    fi
+
+    
+    # 9. Network proxies
+    local PROXY_DUMP="${NET_BACKUP_DIR}/network_proxies.txt"
+    {
+        echo "# Network proxy snapshot — $(date)"
+        networksetup -listallnetworkservices 2>/dev/null | tail -n +2 | grep -v '^\*' \
+        | while IFS= read -r SVC; do
+            echo "=== $SVC ==="
+            networksetup -getwebproxy        "$SVC" 2>/dev/null
+            networksetup -getsecurewebproxy  "$SVC" 2>/dev/null
+            networksetup -getproxybypassdomains "$SVC" 2>/dev/null
+            echo ""
+          done
+    } > "$PROXY_DUMP"
+    log "  [✓] Network proxy settings → ${PROXY_DUMP}"
+
+    # 10. Privoxy LaunchDaemon
+    local PRIV_PLIST="/Library/LaunchDaemons/com.hardening.proxytoggle.plist"
+    [[ -f "$PRIV_PLIST" ]] \
+        && sudo cp "$PRIV_PLIST" "${NET_BACKUP_DIR}/proxytoggle.plist" \
+        && log "  [✓] Privoxy LaunchDaemon plist"
+
+    _write_restore_script "$NET_BACKUP_DIR"
+
     echo ""
-    networksetup -listallnetworkservices 2>/dev/null | tail -n +2 | grep -v '^\*' \
-    | while IFS= read -r SVC; do
-        echo "=== $SVC ==="
-        networksetup -getwebproxy        "$SVC" 2>/dev/null
-        networksetup -getsecurewebproxy  "$SVC" 2>/dev/null
-        networksetup -getproxybypassdomains "$SVC" 2>/dev/null
-        echo ""
-      done
-  } > "$PROXY_DUMP"
-  log "  [✓] Network proxy settings → ${PROXY_DUMP}"
+    log "Backup saved to: ${NET_BACKUP_DIR}"
+    info "To restore /etc/hosts, /etc/pf.conf and /etc/resolver and remove the PF DNS lock: sudo bash ${NET_BACKUP_DIR}/restore.sh"
+    echo ""
+}
 
-  # 4. dnscrypt-proxy status (if installed)
-  if command -v brew &>/dev/null \
-     && brew list --formula dnscrypt-proxy &>/dev/null 2>&1; then
-    brew services list 2>/dev/null \
-      | grep dnscrypt > "${NET_BACKUP_DIR}/dnscrypt_status.txt" || true
-    log "  [✓] dnscrypt-proxy service status"
-  fi
-
-  # 5. Privoxy LaunchDaemon (if exists)
-  local PRIV_PLIST="/Library/LaunchDaemons/com.hardening.proxytoggle.plist"
-  if [[ -f "$PRIV_PLIST" ]]; then
-    sudo cp "$PRIV_PLIST" "${NET_BACKUP_DIR}/proxytoggle.plist" \
-      && log "  [✓] Privoxy LaunchDaemon plist"
-  fi
-
-  # Summary
-  echo ""
-  log "Backup saved to: ${NET_BACKUP_DIR}"
-  info "To restore manually:"
-  info "  sudo cp ${NET_BACKUP_DIR}/pf.conf /etc/pf.conf && sudo pfctl -f /etc/pf.conf"
-  info "  sudo cp ${NET_BACKUP_DIR}/hosts   /etc/hosts"
-  echo ""
+# restore.sh lives next to the files it restores and only uses its own directory
+_write_restore_script() {
+    local DIR="$1"
+    cat > "${DIR}/restore.sh" <<'RESTORE'
+#!/bin/bash
+# Restores the files saved next to this script and removes the PF DNS lock.
+# Run: sudo bash restore.sh
+# The lock is always removed, never restored from the snapshot: it is runtime
+# state, and a restore must not bring back the block the user is escaping.
+# Reload pf.conf afterwards only if you restored it and no VPN kill switch is active:
+#   sudo pfctl -f /etc/pf.conf
+set -u
+[[ "$EUID" -eq 0 ]] || { echo "Run with sudo: sudo bash $0"; exit 1; }
+DIR="$(cd "$(dirname "$0")" && pwd)"
+RC=0
+restore() {  # restore <saved name> <destination>
+    if [[ -f "${DIR}/$1" ]]; then
+        install -m 644 -o root -g wheel "${DIR}/$1" "$2" \
+            && echo "[+] restored $2" || { echo "[!] failed: $2"; RC=1; }
+    else
+        echo "[-] no saved copy of $2 — skipped"
+    fi
+}
+restore hosts /etc/hosts
+restore pf.conf /etc/pf.conf
+if [[ -d "${DIR}/resolver" ]]; then
+    mkdir -p /etc/resolver && cp -R "${DIR}/resolver/." /etc/resolver/ \
+        && echo "[+] restored /etc/resolver" || RC=1
+fi
+# PF DNS lock: anchor-scoped. The main ruleset is not touched, and only our own
+# PF reference (the token file) is released; other holders keep theirs.
+LOCK_ANCHOR="com.apple/foxhole.dnsleak"
+LOCK_LABEL="com.hardening.pf.dnsleak"
+LOCK_HELPER="/usr/local/libexec/foxhole-pf-dnslock"
+LOCK_RULES="/etc/pf.anchors/com.hardening.dnsleak"
+LOCK_TOKEN="/var/db/foxhole/pf.token"
+LOCK_PLIST="/Library/LaunchDaemons/${LOCK_LABEL}.plist"
+launchctl bootout "system/${LOCK_LABEL}" 2>/dev/null
+rm -f "$LOCK_PLIST"
+/sbin/pfctl -a "$LOCK_ANCHOR" -F all >/dev/null 2>&1
+if [[ -s "$LOCK_TOKEN" ]]; then
+    LOCK_REF="$(cat "$LOCK_TOKEN")"
+    case "$LOCK_REF" in
+        ''|*[!0-9]*) ;;
+        *) /sbin/pfctl -X "$LOCK_REF" >/dev/null 2>&1 \
+               || echo "[!] PF reference ${LOCK_REF} not released (already gone, or held by another tool)" ;;
+    esac
+fi
+rm -f "$LOCK_TOKEN" "$LOCK_HELPER" "$LOCK_RULES" "${LOCK_RULES}.new" "${LOCK_PLIST}.new"
+echo "[+] PF DNS lock removed (anchor flushed, boot daemon removed)"
+dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null
+echo "Proxy and DNS-server settings are not restored automatically; see network_proxies.txt and system-dns.txt."
+exit $RC
+RESTORE
+    chmod 700 "${DIR}/restore.sh"
 }
 
 # ──────────────────────────────────────────
@@ -117,7 +228,9 @@ create_net_backup() {
 install_formula() {
     local pkg="$1"
     if brew list --formula --versions "$pkg" &>/dev/null; then
-        warn "${pkg} already installed: $(brew list --formula --versions "$pkg")"
+        local VER
+        VER=$(brew list --formula --versions "$pkg")
+        warn "${pkg} already installed: ${VER}"
         ask "Reinstall ${pkg}?" CONFIRM
         [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]] \
             && brew reinstall "$pkg" \
@@ -129,162 +242,519 @@ install_formula() {
 }
 
 resolve_brew_prefix() {
-  if [[ -z "${BREW_PREFIX:-}" ]]; then
-    BREW_PREFIX=$(brew --prefix 2>/dev/null) || die "Homebrew not found!"
-    export BREW_PREFIX
-  fi
-} 
-
-# ──────────────────────────────────────────
-# DNSCRYPT-PROXY
-# ──────────────────────────────────────────
-install_dnscrypt() {
-  install_formula "dnscrypt-proxy" || die "dnscrypt-proxy install failed!"
-}
-
-enable_dnscrypt() {
-  # user-level service, without sudo
-  local STATUS
-  STATUS=$(brew services list 2>/dev/null | awk '/dnscrypt-proxy/{print $2}')
-
-  if [[ "$STATUS" == "started" ]]; then
-    warn "dnscrypt-proxy already running (user service)."
-    ask "Restart dnscrypt-proxy?" CONFIRM
-    if [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]]; then
-      brew services restart dnscrypt-proxy \
-        || die "dnscrypt-proxy restart failed!"
-    else
-      log "Keeping existing dnscrypt-proxy service."
-      return 0
+    if [[ -z "${BREW_PREFIX:-}" ]]; then
+        BREW_PREFIX=$(brew --prefix 2>/dev/null) || die "Homebrew not found!"
+        export BREW_PREFIX
     fi
-  else
-    log "Starting dnscrypt-proxy (user service)..."
-    brew services start dnscrypt-proxy \
-      || die "dnscrypt-proxy start failed! DNS is not available — aborting."
-  fi
-
-  sleep 2
-  log "Verifying dnscrypt-proxy on UDP:5355..."
-  if sudo lsof +c 15 -Pni UDP:5355 2>/dev/null | grep -q dnscrypt; then
-    log "dnscrypt-proxy confirmed listening on UDP:5355"
-  else
-    warn "dnscrypt-proxy not detected on UDP:5355 — check: brew services list"
-  fi
 }
-
-disable_dnscrypt() {
-  if brew services list 2>/dev/null | grep -q "dnscrypt-proxy"; then
-    log "Stopping dnscrypt-proxy (user service)..."
-    brew services stop dnscrypt-proxy || warn "Failed to stop dnscrypt-proxy"
-  else
-    log "dnscrypt-proxy service not found — nothing to stop."
-  fi
-}
-
-
 
 
 # ──────────────────────────────────────────
 # PF — DNS LEAK PREVENTION
 # ──────────────────────────────────────────
+# Rules live in a child of Apple's "com.apple/*" anchor, which the stock
+# /etc/pf.conf already evaluates: /etc/pf.conf is never edited and the main
+# ruleset (VPN kill switches live there too) is never reloaded.
+readonly PF_LOCK_ANCHOR="com.apple/foxhole.dnsleak"
+readonly PF_LOCK_RULES="/etc/pf.anchors/com.hardening.dnsleak"
+# prepare_pf_dns_lock_anchor writes here; enable_pf_dns_lock moves it into place once
+# the user confirmed. The boot helper never reads it, so a declined mode switch
+# cannot take effect at the next boot.
+readonly PF_LOCK_RULES_NEW="${PF_LOCK_RULES}.new"
+readonly PF_LOCK_HELPER="/usr/local/libexec/foxhole-pf-dnslock"
+readonly PF_LOCK_TOKEN="/var/db/foxhole/pf.token"
+readonly PF_LOCK_LABEL="com.hardening.pf.dnsleak"
+readonly PF_LOCK_PLIST="/Library/LaunchDaemons/com.hardening.pf.dnsleak.plist"
+
+# Physical (en*) interfaces for PF scoping; falls back to common defaults
+_physical_ifaces() {
+    local LIST
+    LIST=$(networksetup -listallhardwareports 2>/dev/null \
+        | awk '/^Device: en[0-9]+$/ {print $2}' | tr '\n' ' ' | sed 's/ $//')
+    printf '%s\n' "${LIST:-en0 en1 en2 bridge0}"
+}
+
+# DNS policy for the lock (FOXHOLE_DNS_MODE, or asked in the menu):
+#   doh    (default) Quad9 reachable only on 443 (DoH profile); plain DNS to Quad9 is blocked
+#   vpn    no Quad9 exception: DNS must go through the VPN tunnel, set the resolver inside the VPN
+#   plain  Quad9 reachable on any port (plain DNS to 9.9.9.9; for users without a DoH profile)
+_choose_dns_mode() {
+    local MODE="${FOXHOLE_DNS_MODE:-}"
+    if [[ -z "$MODE" ]]; then
+        if [[ "${FOXHOLE_ASSUME_YES:-}" == "1" || ! -t 0 ]]; then
+            MODE="doh"
+        else
+            echo "" >&2
+            echo "  DNS policy for the lock:" >&2
+            echo "   [1] doh   — Quad9 over HTTPS only (DoH profile installed, no VPN needed)  [default]" >&2
+            echo "   [2] vpn   — no exception: DNS only through your VPN tunnel (set DNS inside the VPN)" >&2
+            echo "   [3] plain — Quad9 on any port (plain DNS to 9.9.9.9, no DoH profile)" >&2
+            local PICK
+            read -rp "  Choice (1-3, Enter = 1): " PICK
+            case "$PICK" in
+                2) MODE="vpn" ;;
+                3) MODE="plain" ;;
+                *) MODE="doh" ;;
+            esac
+        fi
+    fi
+    case "$MODE" in
+        doh|vpn|plain) printf '%s\n' "$MODE" ;;
+        *) die "Unknown FOXHOLE_DNS_MODE '${MODE}' (use doh, vpn or plain)" ;;
+    esac
+}
+
 prepare_pf_dns_lock_anchor() {
-  local PF_ANCHOR="/etc/pf.anchors/com.hardening.dnsleak"
+    local PF_ANCHOR="$PF_LOCK_RULES_NEW"
+    local DNS_MODE
+    DNS_MODE=$(_choose_dns_mode)
+    info "DNS policy: ${DNS_MODE}"
 
-  log "Writing PF anchor for DNS leak prevention: ${PF_ANCHOR}"
+    log "Writing PF anchor for DNS leak prevention: ${PF_ANCHOR}"
+    sudo mkdir -p /etc/pf.anchors
 
-  sudo tee "$PF_ANCHOR" > /dev/null <<'EOF'
-# Block all direct DNS (IPv4 + IPv6) — only dnscrypt-proxy / DoH allowed
-# pass только с localhost на DoH-порты
-pass out quick proto udp from 127.0.0.1 to any port 443
-pass out quick proto tcp from 127.0.0.1 to any port 443
-pass out quick proto udp from 127.0.0.1 to any port 8443
-pass out quick proto tcp from 127.0.0.1 to any port 8443
-pass out quick proto udp from ::1 to any port 443
-pass out quick proto tcp from ::1 to any port 443
+    local IFACES
+    IFACES=$(_physical_ifaces)
+    local UTUNS=""
+    local N
+    for N in $(seq 0 15); do UTUNS="${UTUNS}${UTUNS:+ }utun${N}"; done
+    info "Physical interfaces scoped for DNS block: ${IFACES}"
 
-# Блокируем прямые DNS (IPv4)
-block out quick proto udp to any port 53
-block out quick proto tcp to any port 53
-block out quick proto tcp to any port 853
+    # Streamed straight to a root-owned file: no user-owned staging file that
+    # another process of the same user could rewrite before root installs it.
+    {
+        cat <<'EOF'
+# ============================================================
+# foxhole-macos — DNS Leak Prevention Anchor
+# Generated by mac-hardening-netlib.sh
+# References: RFC 4890 (ICMPv6), OpenBSD pf docs
+# DNS: macOS native DoH profile (Quad9)
+# KNOWN LIMITATION: DoH on port 443 is not blocked at the PF level.
+# Protection relies on the macOS DoH Configuration Profile (Quad9)
+# being the only active DoH endpoint. Apps bypassing via custom
+# DoH servers (e.g. 8.8.8.8:443) are not covered by this anchor.
+# All rules are "quick": the first matching rule wins.
+# ============================================================
 
-# Блокируем прямые DNS (IPv6)
-block out quick inet6 proto udp to any port 53
-block out quick inet6 proto tcp to any port 53
-block out quick inet6 proto tcp to any port 853
 EOF
+        printf '# DNS policy: %s\n\n' "$DNS_MODE"
+        cat <<'EOF'
+# [1] Loopback
+pass quick on lo0 all
+
+EOF
+        # [2] VPN tunnels. PF on macOS does NOT treat "utun+" as a wildcard (verified:
+        # a block rule on utun+ matched nothing), so list the interfaces explicitly.
+        printf '# [2] VPN tunnels: pass everything on utun0-utun15 (no wildcard in PF)\n'
+        printf 'pass out quick on { %s } all\n' "$UTUNS"
+        printf 'pass in  quick on { %s } all\n' "$UTUNS"
+        cat <<'EOF'
+
+# [3] RFC 4890 ICMPv6 obligatory
+pass quick inet6 proto icmp6 all
+
+EOF
+        local IP
+        case "$DNS_MODE" in
+            doh)
+                printf '# [4] Quad9 whitelist: DoH only (tcp 443); plain DNS to Quad9 stays blocked\n'
+                for IP in "$QUAD9_PRIMARY" "$QUAD9_SECONDARY" \
+                          "$QUAD9_ECS_PRIMARY" "$QUAD9_ECS_SECONDARY"; do
+                    printf 'pass out quick proto tcp to %s port 443\n' "$IP"
+                done
+                ;;
+            plain)
+                printf '# [4] Quad9 whitelist: any port (plain DNS allowed to Quad9)\n'
+                for IP in "$QUAD9_PRIMARY" "$QUAD9_SECONDARY" \
+                          "$QUAD9_ECS_PRIMARY" "$QUAD9_ECS_SECONDARY"; do
+                    printf 'pass out quick proto { udp tcp } to %s\n' "$IP"
+                done
+                ;;
+            vpn)
+                printf '# [4] No Quad9 exception: DNS leaves only through the VPN tunnel (rule [2])\n'
+                ;;
+        esac
+        printf '\n# [5] Block plain DNS (53) and DNS-over-TLS (853) on physical interfaces only\n'
+        printf '# Tunnels are already passed by rule [2], so these never reach them\n'
+        printf 'block out quick on { %s } proto { udp tcp } to any port 53\n' "$IFACES"
+        printf 'block out quick on { %s } proto { udp tcp } to any port 853\n' "$IFACES"
+        printf 'block out quick on { %s } inet6 proto { udp tcp } to any port 53\n' "$IFACES"
+        printf 'block out quick on { %s } inet6 proto { udp tcp } to any port 853\n' "$IFACES"
+    } | sudo tee "$PF_ANCHOR" >/dev/null \
+        || { sudo rm -f "$PF_ANCHOR"; die "Failed to write PF anchor: ${PF_ANCHOR}"; }
+    { sudo chown root:wheel "$PF_ANCHOR" && sudo chmod 644 "$PF_ANCHOR"; } \
+        || { sudo rm -f "$PF_ANCHOR"; die "Failed to set owner/mode on ${PF_ANCHOR}"; }
+    log "  [✓] PF anchor prepared: ${PF_ANCHOR} (applied when the lock is enabled)"
+}
+
+# Root runs scripts from these directories (boot daemons): they must not be
+# writable by anyone else. Parts of /usr/local are user-owned on Intel Homebrew layouts.
+_require_root_dir() {
+    local DIR="$1" DIR_OWNER DIR_MODE
+    sudo mkdir -p "$DIR"
+    DIR_OWNER=$(stat -f '%Su' "$DIR" 2>/dev/null || true)
+    DIR_MODE=$(stat -f '%Lp' "$DIR" 2>/dev/null || true)
+    if [[ "$DIR_OWNER" != "root" || ! "$DIR_MODE" =~ ^[0-7]?[0-7][0145][0145]$ ]]; then
+        die "${DIR} is not root-only writable (owner ${DIR_OWNER:-?}, mode ${DIR_MODE:-?}). Fix: sudo chown root:wheel ${DIR} && sudo chmod 755 ${DIR}"
+    fi
+}
+
+# Helper shared by enable, disable and the boot LaunchDaemon (one code path)
+_install_pf_helper() {
+    _require_root_dir "$(dirname "$PF_LOCK_HELPER")"
+    # Streamed to root (no user-owned staging file): root runs this at every boot
+    if ! sudo tee "${PF_LOCK_HELPER}.new" >/dev/null <<'HELPER'
+#!/bin/bash
+# foxhole-macos PF DNS lock helper — installed by mac-hardening-netlib.sh
+#   start   load the rules into com.apple/foxhole.dnsleak and hold one PF
+#           enable reference (pfctl -E)
+#   boot    same as start, retried a few times (used by the LaunchDaemon: PF
+#           or the main ruleset may not be ready the moment launchd runs it)
+#   stop   flush the rules and release that reference (pfctl -X); PF goes
+#           back off unless something else (e.g. a VPN kill switch) holds one
+#   status  exit 0 if the rules are loaded, the reference is held and the main
+#           ruleset evaluates anchor "com.apple/*" (otherwise the lock is inert)
+# The stock /etc/pf.conf evaluates anchor "com.apple/*", so neither
+# /etc/pf.conf nor the main ruleset is ever touched.
+ANCHOR="com.apple/foxhole.dnsleak"
+RULES="/etc/pf.anchors/com.hardening.dnsleak"
+TOKEN_FILE="/var/db/foxhole/pf.token"
+
+# pfctl prints ALTQ and "-f" warnings on every call; keep the rest
+pf() {
+    local OUT RC
+    OUT=$(/sbin/pfctl "$@" 2>&1); RC=$?
+    grep -v -e 'ALTQ' -e 'Use of -f option' -e 'present in the main ruleset' \
+            -e 'See /etc/pf.conf' -e '^$' <<< "$OUT" || true
+    return $RC
+}
+
+held_token() {
+    local T
+    [[ -s "$TOKEN_FILE" ]] || return 1
+    T=$(cat "$TOKEN_FILE")
+    [[ "$T" =~ ^[0-9]+$ ]] || return 1
+    pf -s References | grep -qw -- "$T" || return 1
+    echo "$T"
+}
+
+rules_loaded() { pf -a "$ANCHOR" -sr | grep -q "port = 53"; }
+
+# Our anchor is a child of com.apple/*: without that line in the main ruleset
+# (custom pf.conf, or another tool replaced it) the rules are never evaluated
+main_has_anchor() { pf -sr | grep -qE '^anchor "com\.apple/\*"'; }
+
+anchor_warning() {
+    main_has_anchor \
+        || echo "$(date '+%F %T') WARNING: main ruleset has no anchor \"com.apple/*\"; the lock is loaded but inert" >&2
+}
+
+# A failed start must not leave block rules without a held reference (a lockout
+# nobody asked for). If our reference is held, the lock was already active and a
+# failed reload (e.g. PF busy) left the previous rules in place: keep them.
+start_failed() {
+    held_token >/dev/null || pf -a "$ANCHOR" -F all >/dev/null || true
+    echo "$(date '+%F %T') $1" >&2
+    return 1
+}
+
+# Loads the rules and holds one PF reference. Returns 1 on failure.
+do_start() {
+    local RENDERED="" IFACES OUT TOKEN
+    [[ -f "$RULES" ]] || { echo "rules file missing: $RULES" >&2; return 1; }
+    # Re-render the interface list of the block rules: the union of the live list
+    # and the list in $RULES. A NIC added since the rules were written is covered,
+    # and one that is missing at boot (dongle, slow enumeration) stays covered: a
+    # name with no interface behind it matches nothing. Both inputs are filtered
+    # to en<N>, so the sed replacement below only ever sees safe names. No temp
+    # file: the rules go to pfctl on stdin. Any failure falls back to $RULES.
+    IFACES=$( { /usr/sbin/networksetup -listallhardwareports 2>/dev/null \
+                  | awk '/^Device: en[0-9]+$/ {print $2}'
+                sed -n -E 's/^block out quick on \{([^}]*)\} .*/\1/p' "$RULES" | tr ' ' '\n'
+              } | grep -E '^en[0-9]+$' | sort -u | tr '\n' ' ' | sed 's/ $//')
+    if [[ -n "$IFACES" ]]; then
+        RENDERED=$(sed -E "s/^(block out quick on \{)[^}]*(\} )/\1 ${IFACES} \2/" "$RULES")
+        if [[ -z "$RENDERED" ]] || ! /sbin/pfctl -nf - <<< "$RENDERED" >/dev/null 2>&1; then
+            echo "re-rendered rules rejected by pfctl; using $RULES as written" >&2
+            RENDERED=""
+        fi
+    fi
+    if [[ -n "$RENDERED" ]]; then
+        pf -a "$ANCHOR" -f - <<< "$RENDERED" >&2 || { start_failed "failed to load $ANCHOR"; return 1; }
+    else
+        pf -a "$ANCHOR" -f "$RULES" >&2 || { start_failed "failed to load $ANCHOR"; return 1; }
+    fi
+    if ! held_token >/dev/null; then
+        OUT=$(pf -E)
+        TOKEN=$(sed -n 's/^Token : //p' <<< "$OUT")
+        [[ -n "$TOKEN" ]] || { start_failed "pfctl -E returned no token: $OUT"; return 1; }
+        mkdir -p "$(dirname "$TOKEN_FILE")"
+        if ! ( umask 077; echo "$TOKEN" > "$TOKEN_FILE" ); then
+            pf -X "$TOKEN" >/dev/null || true
+            pf -a "$ANCHOR" -F all >/dev/null || true
+            echo "cannot write $TOKEN_FILE; PF reference released" >&2
+            return 1
+        fi
+    fi
+    return 0
+}
+
+case "${1:-}" in
+    start)
+        do_start || exit 1
+        anchor_warning
+        echo "$(date '+%F %T') start: rules loaded into $ANCHOR, PF reference held"
+        ;;
+    boot)
+        # launchd does not re-run a failed RunAtLoad job, so retry here (bounded)
+        N=1
+        until do_start && main_has_anchor; do
+            [[ "$N" -ge 5 ]] && break
+            N=$((N+1))
+            sleep 2
+        done
+        if ! rules_loaded || ! held_token >/dev/null; then
+            echo "$(date '+%F %T') boot: lock NOT active after $N tries" >&2
+            exit 1
+        fi
+        anchor_warning
+        echo "$(date '+%F %T') boot: rules loaded into $ANCHOR, PF reference held (try $N)"
+        ;;
+    stop)
+        pf -a "$ANCHOR" -F all >/dev/null || true
+        if T=$(held_token); then
+            pf -X "$T" || true
+        fi
+        rm -f "$TOKEN_FILE"
+        echo "$(date '+%F %T') stop: rules flushed, PF reference released"
+        ;;
+    status)
+        rules_loaded && held_token >/dev/null && main_has_anchor
+        ;;
+    *)
+        echo "usage: $0 start|boot|stop|status" >&2; exit 2
+        ;;
+esac
+HELPER
+    then
+        sudo rm -f "${PF_LOCK_HELPER}.new"
+        die "Failed to write ${PF_LOCK_HELPER}"
+    fi
+    { sudo chown root:wheel "${PF_LOCK_HELPER}.new" && sudo chmod 755 "${PF_LOCK_HELPER}.new" \
+        && sudo mv -f "${PF_LOCK_HELPER}.new" "$PF_LOCK_HELPER"; } \
+        || { sudo rm -f "${PF_LOCK_HELPER}.new"; die "Failed to install ${PF_LOCK_HELPER}"; }
+}
+
+_launchd_bootout() {
+    sudo launchctl bootout "system/$1" 2>/dev/null || true
+}
+
+# bootstrap can fail with "5: Input/output error" right after a bootout
+_launchd_bootstrap() {
+    local _
+    for _ in 1 2 3; do
+        sudo launchctl bootstrap system "$1" 2>/dev/null && return 0
+        sleep 1
+    done
+    return 1
+}
+
+# Main ruleset evaluates the com.apple/* children (stock /etc/pf.conf)
+_pf_main_has_apple_anchor() {
+    sudo pfctl -sr 2>/dev/null | grep -qE '^anchor "com\.apple/\*"'
+}
+
+# Pre-0.17.3 installs edited /etc/pf.conf and loaded anchor "com.hardening.dnsleak"
+_pf_legacy_cleanup() {
+    local PF_CONF="/etc/pf.conf"
+    local PF_MARKER="# ===== hardening dns lock ====="
+
+    if [[ -f "$PF_CONF" ]] && grep -qF "$PF_MARKER" "$PF_CONF"; then
+        info "Removing the DNS lock lines an older version added to ${PF_CONF}..."
+        # Streamed to a root-owned file next to pf.conf (no user-owned staging file)
+        local NEW_CONF="${PF_CONF}.foxhole.new"
+        grep -vF -e "$PF_MARKER" \
+                 -e 'anchor "com.hardening.dnsleak"' "$PF_CONF" | sudo tee "$NEW_CONF" >/dev/null \
+            || { sudo rm -f "$NEW_CONF"; die "Failed to process PF configuration file"; }
+        sudo cp "$PF_CONF" "${PF_CONF}.bak.hardening_$(date +%Y%m%d_%H%M%S)"
+        { sudo chown root:wheel "$NEW_CONF" && sudo chmod 644 "$NEW_CONF" \
+            && sudo mv -f "$NEW_CONF" "$PF_CONF"; } \
+            || { sudo rm -f "$NEW_CONF"; die "Failed to install ${PF_CONF}"; }
+        # The reload replaces the whole main ruleset, so a VPN kill switch loaded
+        # there is dropped too. Ask first; declining keeps the main ruleset as it is.
+        warn "Reloading the main PF ruleset replaces every rule in it, including a VPN kill switch's."
+        ask "Reload the main PF ruleset now?" CONFIRM_RELOAD
+        if [[ "$CONFIRM_RELOAD" == "y" || "$CONFIRM_RELOAD" == "Y" ]]; then
+            sudo pfctl -f "$PF_CONF" 2>/dev/null \
+                || warn "PF reload failed — check: sudo pfctl -nf ${PF_CONF}"
+        else
+            warn "Reload skipped. The old anchor stays in the main ruleset until the next PF reload or reboot."
+        fi
+        log "  [✓] ${PF_CONF} restored (backup saved next to it)"
+        info "Older versions enabled PF with 'pfctl -e'; it stays on. If nothing else uses PF: sudo pfctl -d"
+    fi
+    sudo pfctl -a com.hardening.dnsleak -F all >/dev/null 2>&1 || true
+}
+
+# Back to "lock fully off": no boot daemon, no rules, no PF reference of ours
+_pf_lock_rollback() {
+    _launchd_bootout "$PF_LOCK_LABEL"
+    sudo rm -f "$PF_LOCK_PLIST" "${PF_LOCK_PLIST}.new" || true
+    sudo /bin/bash "$PF_LOCK_HELPER" stop >/dev/null 2>&1 \
+        || sudo pfctl -a "$PF_LOCK_ANCHOR" -F all >/dev/null 2>&1 || true
 }
 
 enable_pf_dns_lock() {
-  local PF_CONF="/etc/pf.conf"
-  local PF_MARKER="# ===== hardening dns lock ====="
+    log "Enabling PF DNS leak lock..."
+    warn "WARNING: Blocks direct DNS (53/853 v4/v6)."
+    warn "Mode doh/plain: install the Quad9 DoH profile first. Mode vpn: set your resolver inside the VPN."
+    info "Captive portals (hotel/airport Wi-Fi) and VPN clients that find their server by name need plain DNS: disable the lock to join, then enable it again."
+    ask "Continue enabling PF DNS lock?" CONFIRM
+    if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
+        sudo rm -f "$PF_LOCK_RULES_NEW" || true
+        log "PF DNS lock aborted by user. Nothing was changed."
+        return 0
+    fi
 
-  log "Enabling PF DNS leak lock..."
+    [[ -f "$PF_LOCK_RULES_NEW" || -f "$PF_LOCK_RULES" ]] \
+        || die "PF rules missing: ${PF_LOCK_RULES} (run prepare_pf_dns_lock_anchor first)"
 
-  warn "ВНИМАНИЕ: Эта секция заблокирует прямые DNS-запросы (53/853 v4/v6)."
-  warn "Убедитесь, что DoH/DNS профиль (например Quad9) уже настроен."
-  ask "Продолжить включение PF DNS lock?" CONFIRM
-  if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
-    log "PF DNS lock aborted by user."
-    return 0
-  fi
+    _pf_legacy_cleanup
 
-  if ! grep -qF "$PF_MARKER" "$PF_CONF" 2>/dev/null; then
-    sudo tee -a "$PF_CONF" > /dev/null <<EOF
+    # Rules in com.apple/foxhole.dnsleak only apply if the main ruleset evaluates com.apple/*
+    if ! _pf_main_has_apple_anchor; then
+        if [[ -z "$(sudo pfctl -sr 2>/dev/null)" ]] \
+           && grep -qE '^anchor "com\.apple/\*"' /etc/pf.conf 2>/dev/null; then
+            # Nothing loaded yet, so there is nothing to clobber
+            info "PF main ruleset is empty — loading the stock /etc/pf.conf once."
+            sudo pfctl -f /etc/pf.conf 2>/dev/null || die "Failed to load /etc/pf.conf"
+        else
+            err "PF main ruleset does not evaluate anchor \"com.apple/*\" — the lock would never apply."
+            info "A custom /etc/pf.conf or another tool replaced it. Inspect: sudo pfctl -sr"
+            sudo rm -f "$PF_LOCK_RULES_NEW" || true
+            return 1
+        fi
+    fi
 
-$PF_MARKER
-anchor "com.hardening.dnsleak"
-load anchor "com.hardening.dnsleak" from "/etc/pf.anchors/com.hardening.dnsleak"
+    # Confirmed and applicable: the prepared rules become the live rules file
+    if [[ -f "$PF_LOCK_RULES_NEW" ]]; then
+        sudo mv -f "$PF_LOCK_RULES_NEW" "$PF_LOCK_RULES" \
+            || die "Failed to install PF rules: ${PF_LOCK_RULES}"
+    fi
+
+    _install_pf_helper
+
+    # Start synchronously and check the result before the boot daemon exists, so a
+    # failed start cannot leave a plist that turns the lock on at the next boot.
+    if ! sudo /bin/bash "$PF_LOCK_HELPER" start >/dev/null \
+       || ! sudo /bin/bash "$PF_LOCK_HELPER" status >/dev/null; then
+        err "PF DNS lock did not come up; rolled back (lock is off). Log: /var/log/foxhole-pf.log"
+        sudo tail -n 5 /var/log/foxhole-pf.log 2>/dev/null || true
+        _pf_lock_rollback
+        return 1
+    fi
+
+    # Boot persistence. Its RunAtLoad run finds the token held and only reloads
+    # the anchor. If the daemon cannot be installed, roll the lock back.
+    if ! _install_pf_launchdaemon; then
+        err "PF DNS lock: boot daemon could not be installed; rolled back (lock is off)."
+        _pf_lock_rollback
+        return 1
+    fi
+    # The daemon's RunAtLoad run reloads the anchor in the background: wait for it
+    # and check once more, so "ACTIVE" is true when this function returns.
+    local _
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        sudo launchctl print "system/${PF_LOCK_LABEL}" 2>/dev/null | grep -q 'state = running' || break
+        sleep 0.5
+    done
+    if ! sudo /bin/bash "$PF_LOCK_HELPER" status >/dev/null; then
+        err "PF DNS lock went down after the boot daemon ran; rolled back (lock is off). Log: /var/log/foxhole-pf.log"
+        sudo tail -n 5 /var/log/foxhole-pf.log 2>/dev/null || true
+        _pf_lock_rollback
+        return 1
+    fi
+    log "PF DNS lock: ACTIVE ✓ (anchor ${PF_LOCK_ANCHOR})"
+}
+
+# Returns 1 (never exits) when the daemon is not installed and bootstrapped
+_install_pf_launchdaemon() {
+    _launchd_bootout "$PF_LOCK_LABEL"
+    # Streamed to root (no user-owned staging file); launchd ignores "*.plist.new"
+    if ! sudo tee "${PF_LOCK_PLIST}.new" >/dev/null << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.hardening.pf.dnsleak</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/usr/local/libexec/foxhole-pf-dnslock</string>
+        <string>boot</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/var/log/foxhole-pf.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/foxhole-pf.log</string>
+</dict>
+</plist>
 EOF
-    log "PF marker added to ${PF_CONF}"
-  else
-    warn "PF DNS lock marker already present in ${PF_CONF}"
-  fi
-
-  if sudo pfctl -f "$PF_CONF" 2>/dev/null && sudo pfctl -e 2>/dev/null; then
-    log "PF rules loaded — DNS leak prevention active."
-  else
-    warn "PF reload failed — reboot may be required."
-  fi
-
-  if sudo pfctl -sr 2>/dev/null | grep -q "port 53"; then
-    log "PF DNS lock: ACTIVE ✓"
-  else
-    warn "PF DNS lock: verify manually: sudo pfctl -sr"
-  fi
+    then
+        sudo rm -f "${PF_LOCK_PLIST}.new" || true
+        warn "Failed to write ${PF_LOCK_PLIST}"
+        return 1
+    fi
+    if ! { sudo chown root:wheel "${PF_LOCK_PLIST}.new" && sudo chmod 644 "${PF_LOCK_PLIST}.new" \
+           && sudo mv -f "${PF_LOCK_PLIST}.new" "$PF_LOCK_PLIST"; }; then
+        sudo rm -f "${PF_LOCK_PLIST}.new" || true
+        warn "Failed to install ${PF_LOCK_PLIST}"
+        return 1
+    fi
+    if ! _launchd_bootstrap "$PF_LOCK_PLIST"; then
+        warn "launchctl bootstrap failed for ${PF_LOCK_PLIST}"
+        return 1
+    fi
+    log "  [✓] PF LaunchDaemon installed (re-applies the lock at boot)"
 }
 
 disable_pf_dns_lock() {
-  local PF_CONF="/etc/pf.conf"
-  local PF_MARKER="# ===== hardening dns lock ====="
+    log "Disabling PF DNS leak lock..."
 
-  log "Disabling PF DNS leak lock..."
+    _launchd_bootout "$PF_LOCK_LABEL"
+    sudo rm -f "$PF_LOCK_PLIST"
 
-  if [[ -f "$PF_CONF" ]] && grep -qF "$PF_MARKER" "$PF_CONF"; then
-    local TMP_CONF
-    TMP_CONF=$(mktemp)
+    # Flush before anything below can fail: the block rules must not outlive a failed disable
+    sudo pfctl -a "$PF_LOCK_ANCHOR" -F all >/dev/null 2>&1 || true
 
-    # вырезаем блок маркера
-    awk "
-      /$PF_MARKER/ {exit}
-      {print}
-    " "$PF_CONF" > "$TMP_CONF"
+    # Re-install first so the current stop logic runs even if the helper is missing.
+    # In a subshell: a die in there must not stop the removal half-way.
+    if ( _install_pf_helper ); then
+        sudo /bin/bash "$PF_LOCK_HELPER" stop >/dev/null \
+            || warn "PF lock helper stop failed"
+    else
+        warn "PF lock helper could not be installed; releasing the PF reference directly."
+        local REF
+        REF=$(sudo cat "$PF_LOCK_TOKEN" 2>/dev/null || true)
+        if [[ "$REF" =~ ^[0-9]+$ ]]; then
+            sudo pfctl -X "$REF" >/dev/null 2>&1 || true
+        fi
+    fi
+    sudo rm -f "$PF_LOCK_HELPER" "${PF_LOCK_HELPER}.new" "$PF_LOCK_RULES" "$PF_LOCK_RULES_NEW" "$PF_LOCK_TOKEN"
 
-    sudo cp "$PF_CONF" "${PF_CONF}.bak.hardening_$(date +%Y%m%d_%H%M%S)"
-    sudo mv "$TMP_CONF" "$PF_CONF"
-    log "PF marker removed, backup saved."
-  else
-    log "No PF DNS lock marker found — nothing to remove."
-  fi
+    _pf_legacy_cleanup
 
-  # You can leave the anchor or delete it as well
-  sudo rm -f /etc/pf.anchors/com.hardening.dnsleak || true
-
-  if sudo pfctl -f "$PF_CONF" 2>/dev/null; then
-    log "PF reloaded without DNS lock."
-  fi
+    if sudo pfctl -s info 2>/dev/null | grep -q "Status: Enabled"; then
+        info "PF stays enabled: a reference is still held, by another program or a lost one of ours (sudo pfctl -s References)."
+    else
+        log "PF is off again (as before the lock)."
+    fi
+    log "PF DNS lock removed."
 }
-
-
 
 # ──────────────────────────────────────────
 # HOSTS — IDEMPOTENT UPDATE
@@ -293,16 +763,23 @@ update_hosts() {
     local MARKER="# ===== StevenBlack Blocklist ====="
     local HOSTS_URL="https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
     local HOSTS_FILE="/etc/hosts"
-    local BACKUP="/etc/hosts.bak.$(date +%Y%m%d_%H%M%S)"
+    local BACKUP
+    BACKUP="/etc/hosts.bak.$(date +%Y%m%d_%H%M%S)"
     local MIN_LINES=50
+    local HAS_BLOCKLIST=false
     local TMP_HOSTS
-    TMP_HOSTS=$(mktemp)
+    # Root-owned copy of the download: validated, hashed and applied from here, so
+    # the user-owned download file cannot be swapped after the checks
+    local STAGED="/etc/hosts.foxhole.download"
 
     log "Checking /etc/hosts..."
 
+    # 1. Decide (no changes yet)
     if grep -qF "$MARKER" "$HOSTS_FILE"; then
+        HAS_BLOCKLIST=true
         local BLOCK_LINES
-        BLOCK_LINES=$(grep -c "^0\.0\.0\.0" "$HOSTS_FILE" 2>/dev/null || echo 0)
+        BLOCK_LINES=$(grep -c "^0\.0\.0\.0" "$HOSTS_FILE" 2>/dev/null || true)
+        BLOCK_LINES=${BLOCK_LINES:-0}
         warn "StevenBlack blocklist found. Blocked domains: ${BLOCK_LINES}"
         if [[ "$BLOCK_LINES" -ge "$MIN_LINES" ]]; then
             info "Blocklist has ${BLOCK_LINES} entries — looks healthy."
@@ -312,15 +789,8 @@ update_hosts() {
             ask "Re-download blocklist?" CONFIRM
         fi
         if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
-            log "Skipping hosts update."; rm -f "$TMP_HOSTS"; return 0
+            log "Skipping hosts update."; return 0
         fi
-        local LINE_NUM
-        LINE_NUM=$(grep -nF "$MARKER" "$HOSTS_FILE" | cut -d: -f1 | head -1)
-        sudo cp "$HOSTS_FILE" "$BACKUP"
-        sudo head -n "$((LINE_NUM - 1))" "$HOSTS_FILE" \
-            | sudo tee "${HOSTS_FILE}.new" > /dev/null
-        sudo mv "${HOSTS_FILE}.new" "$HOSTS_FILE"
-        log "Old blocklist removed. Backup: $BACKUP"
     else
         local TOTAL_LINES
         TOTAL_LINES=$(wc -l < "$HOSTS_FILE" | tr -d ' ')
@@ -330,342 +800,551 @@ update_hosts() {
             grep -v "^#\|^[[:space:]]*$" "$HOSTS_FILE" | head -30 || true
             ask "Add StevenBlack below existing content?" CONFIRM
             if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
-                log "Skipping hosts update."; rm -f "$TMP_HOSTS"; return 0
+                log "Skipping hosts update."; return 0
             fi
         fi
-        sudo cp "$HOSTS_FILE" "$BACKUP"
-        log "Backup: $BACKUP"
     fi
 
+    # 2. Download and validate before touching /etc/hosts, so a failed or
+    #    truncated download never leaves the system without a blocklist
+    TMP_HOSTS=$(mktemp)
     log "Downloading StevenBlack blocklist..."
     if ! curl -fsSL "$HOSTS_URL" -o "$TMP_HOSTS"; then
-        rm -f "$TMP_HOSTS"; die "Failed to download StevenBlack hosts!"
+        rm -f "$TMP_HOSTS"; die "Failed to download StevenBlack hosts! /etc/hosts unchanged."
+    fi
+    sudo install -m 644 -o root -g wheel "$TMP_HOSTS" "$STAGED" \
+        || { rm -f "$TMP_HOSTS"; die "Failed to stage the download. /etc/hosts unchanged."; }
+    rm -f "$TMP_HOSTS"
+    local NEW_LINES
+    NEW_LINES=$(grep -c "^0\.0\.0\.0 " "$STAGED" || true)
+    if [[ "${NEW_LINES:-0}" -lt 1000 ]]; then
+        sudo rm -f "$STAGED"
+        die "Downloaded file has only ${NEW_LINES:-0} block entries — not a hosts blocklist? /etc/hosts unchanged."
     fi
 
-    # [FIX v5] SHA-256 for verification
+    # SHA-256 + [M-4]: inform user about last commit
     local SHA256
-    SHA256=$(shasum -a 256 "$TMP_HOSTS" | awk '{print $1}')
-    info "SHA-256 скачанного файла: ${SHA256}"
-    info "Сверьте с: https://github.com/StevenBlack/hosts (последний коммит)"
+    SHA256=$(shasum -a 256 "$STAGED" | awk '{print $1}')
+    info "SHA-256: ${SHA256}"
+    local LATEST_COMMIT
+    LATEST_COMMIT=$(curl -fsSL \
+        "https://api.github.com/repos/StevenBlack/hosts/commits?path=hosts&per_page=1" \
+        2>/dev/null | grep '"sha"' | head -1 | awk -F'"' '{print $4}' | cut -c1-7) || true
+    info "Latest GitHub commit: ${LATEST_COMMIT:-unknown}"
+    info "Verify at: https://github.com/StevenBlack/hosts/commits/master/hosts"
+
+    # 3. Apply
+    sudo cp "$HOSTS_FILE" "$BACKUP"
+    log "Backup: $BACKUP"
+    if [[ "$HAS_BLOCKLIST" == true ]]; then
+        local LINE_NUM
+        LINE_NUM=$(grep -nF "$MARKER" "$HOSTS_FILE" | cut -d: -f1 | head -1)
+        sudo head -n "$((LINE_NUM - 1))" "$HOSTS_FILE" \
+            | sudo tee "${HOSTS_FILE}.new" > /dev/null
+        sudo mv "${HOSTS_FILE}.new" "$HOSTS_FILE"
+        log "Old blocklist removed."
+    fi
 
     {
         printf "\n%s\n" "$MARKER"
-        printf "# Added: %s\n" "$(date)"
-        printf "# Source: %s\n" "$HOSTS_URL"
+        printf "# Added:   %s\n" "$(date)"
+        printf "# Source:  %s\n" "$HOSTS_URL"
         printf "# SHA-256: %s\n" "$SHA256"
-        cat "$TMP_HOSTS"
+        printf "# Commit:  %s\n" "${LATEST_COMMIT:-unknown}"
+        cat "$STAGED"
     } | sudo tee -a "$HOSTS_FILE" > /dev/null
 
-    rm -f "$TMP_HOSTS"
+    sudo rm -f "$STAGED"
+    sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder 2>/dev/null || true
 
     local TOTAL
     TOTAL=$(grep -c "^0\.0\.0\.0" "$HOSTS_FILE" 2>/dev/null || echo "?")
     log "/etc/hosts updated. Blocked domains: ${TOTAL}"
-
 }
 
-# ──────────────────────────────────────────
-# HOSTS — DISABLE HOST BLOCKLIST
-# ──────────────────────────────────────────
 disable_hosts_blocklist() {
-  local MARKER="# ===== StevenBlack Blocklist ====="
-  local HOSTS_FILE="/etc/hosts"
-  local BACKUP="/etc/hosts.bak.remove_$(date +%Y%m%d_%H%M%S)"
+    local MARKER="# ===== StevenBlack Blocklist ====="
+    local HOSTS_FILE="/etc/hosts"
+    local BACKUP
+    BACKUP="/etc/hosts.bak.remove_$(date +%Y%m%d_%H%M%S)"
 
-  if ! grep -qF "$MARKER" "$HOSTS_FILE" 2>/dev/null; then
-    log "No StevenBlack marker in ${HOSTS_FILE} — nothing to remove."
-    return 0
-  fi
+    if ! grep -qF "$MARKER" "$HOSTS_FILE" 2>/dev/null; then
+        log "No StevenBlack marker in ${HOSTS_FILE} — nothing to remove."
+        return 0
+    fi
 
-  log "Removing StevenBlack blocklist from ${HOSTS_FILE}..."
-  sudo cp "$HOSTS_FILE" "$BACKUP"
-
-  local LINE_NUM
-  LINE_NUM=$(grep -nF "$MARKER" "$HOSTS_FILE" | cut -d: -f1 | head -1)
-
-  sudo head -n "$((LINE_NUM - 1))" "$HOSTS_FILE" > "${HOSTS_FILE}.new"
-  sudo mv "${HOSTS_FILE}.new" "$HOSTS_FILE"
-  log "Blocklist removed. Backup: $BACKUP"
+    log "Removing StevenBlack blocklist from ${HOSTS_FILE}..."
+    sudo cp "$HOSTS_FILE" "$BACKUP"
+    local LINE_NUM
+    LINE_NUM=$(grep -nF "$MARKER" "$HOSTS_FILE" | cut -d: -f1 | head -1)
+    sudo head -n "$((LINE_NUM - 1))" "$HOSTS_FILE" | sudo tee "${HOSTS_FILE}.new" > /dev/null
+    sudo mv "${HOSTS_FILE}.new" "$HOSTS_FILE"
+    log "Blocklist removed. Backup: $BACKUP"
 }
 
 # ──────────────────────────────────────────
 # PRIVOXY
 # ──────────────────────────────────────────
-
 install_privoxy() {
-  install_formula "privoxy" || die "privoxy install failed!"
-
-  if [[ -z "${BREW_PREFIX:-}" ]]; then
-    die "BREW_PREFIX is not set. Call resolve_brew_prefix first."
-  fi
-
-  local PRIVOXY_CONF="${BREW_PREFIX}/etc/privoxy/config"
-  if [[ ! -f "$PRIVOXY_CONF" ]]; then
-    die "Privoxy config not found: ${PRIVOXY_CONF}. Проверьте brew --prefix."
-  fi
+    install_formula "privoxy" || die "privoxy install failed!"
+    resolve_brew_prefix
+    local PRIVOXY_CONF="${BREW_PREFIX}/etc/privoxy/config"
+    if [[ ! -f "$PRIVOXY_CONF" ]]; then
+        die "Privoxy config not found: ${PRIVOXY_CONF}. Check brew --prefix."
+    fi
+    # Nothing else starts it; without it the proxy toggle would point at a dead port
+    if brew services start privoxy >/dev/null 2>&1; then
+        log "  [✓] Privoxy service started (brew services, runs at login)"
+    else
+        warn "Could not start Privoxy — try: brew services start privoxy"
+    fi
 }
 
 configure_privoxy_vpn_bypass() {
-  local PRIVOXY_CONF="${BREW_PREFIX}/etc/privoxy/config"
-  local BYPASS_MARKER="# ===== VPN bypass ====="
+    resolve_brew_prefix
+    local PRIVOXY_CONF="${BREW_PREFIX}/etc/privoxy/config"
+    local BYPASS_MARKER="# ===== VPN bypass ====="
 
-  if grep -qF "$BYPASS_MARKER" "$PRIVOXY_CONF" 2>/dev/null; then
-    warn "Privoxy VPN bypass already configured."
-    return 0
-  fi
+    if grep -qF "$BYPASS_MARKER" "$PRIVOXY_CONF" 2>/dev/null; then
+        warn "Privoxy VPN bypass already configured."
+        return 0
+    fi
 
-  log "Adding VPN bypass rules to Privoxy config..."
-  sudo tee -a "$PRIVOXY_CONF" > /dev/null <<'EOF'
+    log "Adding VPN bypass rules to Privoxy config..."
+    # forward takes URL patterns, not CIDR ("10.0.0.0/8" would match host
+    # 10.0.0.0 with path /8). Host patterns accept * and [] classes.
+    sudo tee -a "$PRIVOXY_CONF" > /dev/null << 'EOF'
 # ===== VPN bypass =====
-forward 10.0.0.0/8   .
-forward 172.16.0.0/12 .
-forward 192.168.0.0/16 .
-forward 100.64.0.0/10 .
-forward 127.0.0.0/8   .
+# 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 127.0.0.0/8
+forward 10.*.*.*/                .
+forward 172.1[6-9].*.*/          .
+forward 172.2[0-9].*.*/          .
+forward 172.3[01].*.*/           .
+forward 192.168.*.*/             .
+forward 100.6[4-9].*.*/          .
+forward 100.[7-9][0-9].*.*/      .
+forward 100.1[01][0-9].*.*/      .
+forward 100.12[0-7].*.*/         .
+forward 127.*.*.*/               .
+forward localhost/               .
 EOF
+    log "  [✓] VPN bypass rules added"
 }
 
+# Root runs the toggle from a LaunchDaemon: it lives next to the PF helper in a
+# root-only directory. Up to v0.17.3 it was /usr/local/bin/proxy-toggle.sh.
+readonly PROXY_TOGGLE="/usr/local/libexec/proxy-toggle.sh"
+readonly PROXY_TOGGLE_LEGACY="/usr/local/bin/proxy-toggle.sh"
+
 enable_privoxy_vpn_autoswitch() {
-  local TOGGLE_SCRIPT="/usr/local/bin/proxy-toggle.sh"
-  local DAEMON_PLIST="/Library/LaunchDaemons/com.hardening.proxytoggle.plist"
-  local TOGGLE_LOG="/var/log/proxy-toggle.log"
+    local TOGGLE_SCRIPT="$PROXY_TOGGLE"
+    local DAEMON_PLIST="/Library/LaunchDaemons/com.hardening.proxytoggle.plist"
+    local TOGGLE_LOG="/var/log/proxy-toggle.log"
 
-  log "Configuring Privoxy VPN auto-switch LaunchDaemon..."
+    log "Configuring Privoxy VPN auto-switch LaunchDaemon..."
 
-  sudo tee "$TOGGLE_SCRIPT" > /dev/null <<'SCRIPT'
+    # CR-4: Log SHA-256 before overwriting
+    if [[ -f "$TOGGLE_SCRIPT" ]]; then
+        local EXISTING_HASH
+        EXISTING_HASH=$(shasum -a 256 "$TOGGLE_SCRIPT" | awk '{print $1}')
+        warn "Overwriting existing proxy-toggle.sh (SHA-256: ${EXISTING_HASH})"
+    fi
+
+    _require_root_dir "$(dirname "$TOGGLE_SCRIPT")"
+    # Written to a root-owned *.new file, then moved: never a half-written script
+    sudo tee "${TOGGLE_SCRIPT}.new" > /dev/null << 'SCRIPT'
 #!/bin/bash
 LOG="/var/log/proxy-toggle.log"
-MAX_LOG_SIZE=5242880 # 5 MB
+MAX_LOG_SIZE=5242880
 
 log_msg() {
-  if [[ -f "$LOG" ]] && [[ $(stat -f%z "$LOG" 2>/dev/null || echo 0) -gt $MAX_LOG_SIZE ]]; then
-    tail -n 500 "$LOG" > "${LOG}.tmp" && mv "${LOG}.tmp" "$LOG"
-  fi
-  echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOG"
+    if [[ -f "$LOG" ]] && [[ $(stat -f%z "$LOG" 2>/dev/null || echo 0) -gt $MAX_LOG_SIZE ]]; then
+        tail -n 500 "$LOG" > "${LOG}.tmp" && mv "${LOG}.tmp" "$LOG"
+    fi
+    echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOG"
 }
 
 vpn_active() {
-  ifconfig 2>/dev/null \
-    | awk '/^utun[0-9]/{found=1} found && /inet /{print; exit}' \
-    | grep -q "inet" && return 0
-  return 1
+    # H-3: Network Extension VPNs via scutil, excluding iCloud/Tailscale.
+    # Match "(Connected)" exactly: "(Disconnected)" also contains "Connected".
+    scutil --nc list 2>/dev/null \
+        | grep -F "(Connected)" \
+        | grep -viE "tailscale|icloud|relay" \
+        | grep -q "." && return 0
+    # Tunnels that scutil does not list (Mullvad, ClearVPN, OpenVPN):
+    # a utun with an IPv4 address. System utuns (iCloud, Continuity) only
+    # carry IPv6 link-local; Tailscale's 100.64.0.0/10 is skipped.
+    local IF
+    for IF in $(ifconfig -l 2>/dev/null); do
+        [[ "$IF" == utun* ]] || continue
+        ifconfig "$IF" 2>/dev/null | awk '$1 == "inet" {print $2}' \
+            | grep -vqE '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.' \
+            && return 0
+    done
+    return 1
+}
+
+privoxy_listening() {
+    /usr/bin/nc -z -G 2 127.0.0.1 8118 >/dev/null 2>&1
 }
 
 get_services() {
-  networksetup -listallnetworkservices 2>/dev/null \
-    | tail -n +2 \
-    | grep -v "^\*" \
-    | grep -vEi "vpn|cisco|anyconnect|wireguard|tailscale"
+    networksetup -listallnetworkservices 2>/dev/null \
+        | tail -n +2 \
+        | grep -v "^\*" \
+        | grep -vEi "vpn|cisco|anyconnect|wireguard"
+}
+
+# "Yes 127.0.0.1 8118" style summary of one -getwebproxy/-getsecurewebproxy
+proxy_state() {
+    networksetup "$1" "$2" 2>/dev/null \
+        | awk -F': ' '$1=="Enabled"{e=$2} $1=="Server"{s=$2} $1=="Port"{p=$2} END{print e, s, p}'
 }
 
 set_proxy() {
-  local STATE="$1"
-  while IFS= read -r SERVICE; do
-    [[ -z "$SERVICE" ]] && continue
-    networksetup -setwebproxystate "$SERVICE" "$STATE" 2>/dev/null
-    networksetup -setsecurewebproxystate "$SERVICE" "$STATE" 2>/dev/null
-    if [[ "$STATE" == "on" ]]; then
-      networksetup -setwebproxy "$SERVICE" "127.0.0.1" "8118" 2>/dev/null
-      networksetup -setsecurewebproxy "$SERVICE" "127.0.0.1" "8118" 2>/dev/null
-    fi
-  done <<< "$(get_services)"
+    local STATE="$1" WANT
+    # Only write when something changes: every write touches
+    # /Library/Preferences/SystemConfiguration, which is our own WatchPath
+    if [[ "$STATE" == "on" ]]; then WANT="Yes 127.0.0.1 8118"; else WANT="No"; fi
+    while IFS= read -r SERVICE; do
+        [[ -z "$SERVICE" ]] && continue
+        local ERR KIND CUR
+        for KIND in web secureweb; do
+            CUR=$(proxy_state "-get${KIND}proxy" "$SERVICE")
+            if [[ "$STATE" == "on" && "$CUR" == "$WANT" ]] \
+               || [[ "$STATE" == "off" && "$CUR" == No* ]]; then
+                continue
+            fi
+            if [[ "$STATE" == "on" ]]; then
+                ERR=$(networksetup "-set${KIND}proxy" "$SERVICE" "127.0.0.1" "8118" 2>&1) \
+                    || log_msg "[!] networksetup failed for '${SERVICE}': ${ERR}"
+            fi
+            ERR=$(networksetup "-set${KIND}proxystate" "$SERVICE" "$STATE" 2>&1) \
+                || log_msg "[!] networksetup failed for '${SERVICE}': ${ERR}"
+            log_msg "${SERVICE}: ${KIND} proxy ${STATE}"
+        done
+    done <<< "$(get_services)"
 }
 
 if vpn_active; then
-  log_msg "VPN detected → proxy OFF"
-  set_proxy off
+    set_proxy off
+elif ! privoxy_listening; then
+    # Pointing the system at a dead proxy would cut all web traffic
+    log_msg "[!] No VPN, but Privoxy is not listening on 127.0.0.1:8118 → proxy OFF"
+    set_proxy off
 else
-  log_msg "No VPN → proxy ON"
-  set_proxy on
+    set_proxy on
 fi
 SCRIPT
+    sudo test -s "${TOGGLE_SCRIPT}.new" \
+        || { sudo rm -f "${TOGGLE_SCRIPT}.new"; die "Failed to write ${TOGGLE_SCRIPT}"; }
+    { sudo chown root:wheel "${TOGGLE_SCRIPT}.new" && sudo chmod 755 "${TOGGLE_SCRIPT}.new" \
+        && sudo mv -f "${TOGGLE_SCRIPT}.new" "$TOGGLE_SCRIPT"; } \
+        || { sudo rm -f "${TOGGLE_SCRIPT}.new"; die "Failed to install ${TOGGLE_SCRIPT}"; }
+    
+    # CR-4: Log SHA-256 after write
+    local NEW_HASH
+    NEW_HASH=$(shasum -a 256 "$TOGGLE_SCRIPT" | awk '{print $1}')
+    log "  [✓] proxy-toggle.sh written (SHA-256: ${NEW_HASH})"
 
-  sudo chown root:wheel "$TOGGLE_SCRIPT"
-  sudo chmod 755 "$TOGGLE_SCRIPT"
+    # CR-3: Validate path variables and use single-quoted heredoc
+    [[ "$TOGGLE_SCRIPT" =~ ^[a-zA-Z0-9/_.-]+$ ]] \
+        || die "Invalid path in TOGGLE_SCRIPT: ${TOGGLE_SCRIPT}"
+    [[ "$TOGGLE_LOG" =~ ^[a-zA-Z0-9/_.-]+$ ]] \
+        || die "Invalid path in TOGGLE_LOG: ${TOGGLE_LOG}"
 
-  sudo tee "$DAEMON_PLIST" > /dev/null <<EOF
+    sudo tee "$DAEMON_PLIST" > /dev/null << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key>
-  <string>com.hardening.proxytoggle</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/bash</string>
-    <string>${TOGGLE_SCRIPT}</string>
-  </array>
-  <key>WatchPaths</key>
-  <array>
-    <string>/Library/Preferences/SystemConfiguration</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>ThrottleInterval</key>
-  <integer>5</integer>
-  <key>StandardOutPath</key>
-  <string>${TOGGLE_LOG}</string>
-  <key>StandardErrorPath</key>
-  <string>${TOGGLE_LOG}</string>
+    <key>Label</key>
+    <string>com.hardening.proxytoggle</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/usr/local/libexec/proxy-toggle.sh</string>
+    </array>
+    <key>WatchPaths</key>
+    <array>
+        <string>/Library/Preferences/SystemConfiguration</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+    <key>StandardOutPath</key>
+    <string>/var/log/proxy-toggle.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/proxy-toggle.log</string>
 </dict>
 </plist>
 EOF
 
-  sudo chown root:wheel "$DAEMON_PLIST"
-  sudo chmod 644 "$DAEMON_PLIST"
+    sudo chown root:wheel "$DAEMON_PLIST"
+    sudo chmod 644 "$DAEMON_PLIST"
 
-  sudo launchctl unload "$DAEMON_PLIST" 2>/dev/null || true
-  sudo launchctl load "$DAEMON_PLIST" \
-    && log "LaunchDaemon loaded — proxy auto-switches on VPN." \
-    || die "LaunchDaemon failed to load!"
+    _launchd_bootout com.hardening.proxytoggle
+    sudo rm -f "$PROXY_TOGGLE_LEGACY"   # old location (<= v0.17.3)
+    _launchd_bootstrap "$DAEMON_PLIST" \
+        && log "LaunchDaemon loaded — proxy auto-switches on VPN." \
+        || die "LaunchDaemon failed to load!"
 
-  sudo bash "$TOGGLE_SCRIPT"
+    sudo bash "$TOGGLE_SCRIPT"
 
-  if netstat -an 2>/dev/null | grep -q "0.0.0.0.8118"; then
-    warn "Privoxy exposed on 0.0.0.0:8118 — check config!"
-  else
-    log "Privoxy: loopback only ✓"
-  fi
+    # macOS netstat prints a wildcard listener as "*.8118", not "0.0.0.0.8118"
+    local LISTEN
+    LISTEN=$(netstat -an -p tcp 2>/dev/null | awk '$NF == "LISTEN" && $4 ~ /\.8118$/ {print $4}')
+    if [[ -z "$LISTEN" ]]; then
+        warn "Privoxy is not listening on :8118 — proxy stays OFF until it runs."
+    elif grep -qvE '^(127\.0\.0\.1|::1)\.8118$' <<< "$LISTEN"; then
+        warn "Privoxy exposed beyond loopback (${LISTEN//$'\n'/, }) — check listen-address!"
+    else
+        log "Privoxy: loopback only ✓"
+    fi
 }
 
 disable_privoxy_autoswitch() {
-  local DAEMON_PLIST="/Library/LaunchDaemons/com.hardening.proxytoggle.plist"
-  local TOGGLE_SCRIPT="/usr/local/bin/proxy-toggle.sh"
+    local DAEMON_PLIST="/Library/LaunchDaemons/com.hardening.proxytoggle.plist"
+    log "Disabling Privoxy VPN auto-switch..."
+    _launchd_bootout com.hardening.proxytoggle
+    sudo rm -f "$DAEMON_PLIST" "$PROXY_TOGGLE" "${PROXY_TOGGLE}.new" "$PROXY_TOGGLE_LEGACY"
+    log "  [✓] Privoxy auto-switch disabled"
 
-  log "Disabling Privoxy VPN auto-switch..."
-  sudo launchctl unload "$DAEMON_PLIST" 2>/dev/null || true
-  sudo rm -f "$DAEMON_PLIST" "$TOGGLE_SCRIPT"
+    # The toggle may have left services pointing at 127.0.0.1:8118
+    while IFS= read -r SERVICE; do
+        [[ -z "$SERVICE" ]] && continue
+        local ERR
+        ERR=$(networksetup -setwebproxystate "$SERVICE" off 2>&1) \
+            && log "  [✓] Disabled proxy for ${SERVICE}" \
+            || warn "  [!] Failed to disable proxy for ${SERVICE}: ${ERR}"
+        ERR=$(networksetup -setsecurewebproxystate "$SERVICE" off 2>&1) \
+            && log "  [✓] Disabled secure proxy for ${SERVICE}" \
+            || warn "  [!] Failed to disable secure proxy for ${SERVICE}: ${ERR}"
+    done <<< "$(networksetup -listallnetworkservices | tail -n +2 | grep -v '^\*' || true)"
 }
 
-#---------------------------------------
-# RESET NETWORK HARDENING
-#---------------------------------------
+# ──────────────────────────────────────────
+# DNS STACK HEALTH CHECK
+# ──────────────────────────────────────────
+verify_dns_stack() {
+    echo ""
+    echo "  ╔══════════════════════════════════════════╗"
+    echo "  ║         DNS Stack Health Check           ║"
+    echo "  ╚══════════════════════════════════════════╝"
+    echo ""
+
+    local PASS=0 FAIL=0
+
+    _chk() {
+        local ID="$1" DESC="$2" EXPECT="$3"
+        shift 3
+        local OUT
+        OUT=$("$@" 2>/dev/null || true)
+        if echo "$OUT" | grep -q "$EXPECT"; then
+            log "  [${ID}] ${DESC}"
+            PASS=$((PASS + 1))
+        else
+            err "  [${ID}] ${DESC}"
+            info "       Expected pattern: '${EXPECT}'"
+            info "       Got: $(echo "$OUT" | head -1)"
+            FAIL=$((FAIL + 1))
+        fi
+    }
+
+    # [1] Quad9 Profile active
+    _chk "1" "Quad9 Profile active" "9\.9\.9" scutil --dns
+
+    # [2] utun interfaces pass in the PF anchor:
+    local PF_UTUN
+    PF_UTUN=$(sudo pfctl -a "$PF_LOCK_ANCHOR" -sr 2>/dev/null | grep "utun" || true)
+    if [[ -n "$PF_UTUN" ]]; then
+        log "  [2] PF utun pass rule present ✓"
+        PASS=$((PASS + 1))
+    else
+        err "  [2] PF utun pass rule MISSING"
+        FAIL=$((FAIL + 1))
+    fi
+
+    # [3] Basic DNS resolution
+    _chk "3" "Basic DNS resolution" "[0-9]" dig +short google.com
+
+    # [4] DNSSEC ad flag
+    _chk "4" "DNSSEC (ad flag)" " ad" dig +dnssec icann.org
+
+    # [5] DNSSEC fail test — should return SERVFAIL
+    _chk "5" "DNSSEC validation (SERVFAIL on bad domain)" "SERVFAIL" dig www.dnssec-failed.org
+
+    # [6] Quad9 reachability
+    _chk "6" "Quad9 DoH reachability" "Yes" curl -s --max-time 5 https://on.quad9.net
+
+    # [7] Plain DNS locked from the outside
+    local DNS_OUT
+    # macOS has no `timeout`; use dig's own limits
+    DNS_OUT=$(dig +time=3 +tries=1 google.com @8.8.8.8 2>/dev/null || true)
+    if echo "$DNS_OUT" | grep -q "NOERROR"; then
+        err "  [7] Plain DNS NOT blocked — leak possible (@8.8.8.8 responded)"
+        info "       pf DNS lock may not be active"
+        FAIL=$((FAIL + 1))
+    else
+        log "  [7] Plain DNS blocked (@8.8.8.8) ✓"
+        PASS=$((PASS + 1))
+    fi
+
+    # [8] Split DNS configuration
+    _chk "8" "Split DNS configuration" "resolver" scutil --dns
+
+    # [9] pf enabled
+    _chk "9" "pf firewall enabled" "Enabled" sudo pfctl -s info
+
+    # [10] StevenBlack hosts
+    local HOSTS_COUNT
+    HOSTS_COUNT=$(grep -c "^0\.0\.0\.0" /etc/hosts 2>/dev/null || true)
+    HOSTS_COUNT=${HOSTS_COUNT:-0}
+    if [[ "$HOSTS_COUNT" -gt 1000 ]]; then
+        log "  [10] StevenBlack hosts (${HOSTS_COUNT} entries) ✓"
+        PASS=$((PASS + 1))
+    else
+        err "  [10] StevenBlack hosts (${HOSTS_COUNT} entries — too few)"
+        FAIL=$((FAIL + 1))
+    fi
+
+    echo ""
+    echo "  ──────────────────────────────────────────"
+    echo "  Results: ${PASS}/10 passed, ${FAIL} failed"
+    echo "  ──────────────────────────────────────────"
+    echo ""
+    [[ "$FAIL" -eq 0 ]] && log "All checks passed. Stack is healthy. ✓" \
+                        || warn "${FAIL} check(s) failed — review above."
+    echo ""
+}
+
+# ──────────────────────────────────────────
+# RESET
+# ──────────────────────────────────────────
 reset_net_hardening() {
-  log "Resetting network hardening (dnscrypt, PF DNS lock, Privoxy toggle, hosts blocklist)..."
-
-  disable_dnscrypt
-  disable_pf_dns_lock
-  disable_privoxy_autoswitch
-  disable_hosts_blocklist  # опционально, если хочешь
-
-  # Disable system HTTP(S) proxies
-  for S in $(networksetup -listallnetworkservices | tail -n +2 | grep -v '^\*'); do
-    networksetup -setwebproxystate "$S" off 2>/dev/null || true
-    networksetup -setsecurewebproxystate "$S" off 2>/dev/null || true
-  done
-
-  log "Network hardening reset complete."
+    log "Resetting network hardening (PF DNS lock, Privoxy toggle, hosts blocklist)..."
+    # Each step runs in a subshell: a die in one must not skip the others
+    ( disable_pf_dns_lock ) || warn "PF DNS lock step failed; continuing with the rest."
+    ( disable_privoxy_autoswitch ) || warn "Privoxy step failed; continuing."   # also turns system web proxies off
+    ( disable_hosts_blocklist ) || warn "hosts blocklist step failed; continuing."
+    log "Network hardening reset complete."
 }
 
 # ══════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════
 main() {
-  clear
-  echo ""
-  echo "  ░██████████                      ░██                   ░██           "
-  echo "  ░██                              ░██                   ░██           "
-  echo "  ░██         ░███████  ░██    ░██ ░████████   ░███████  ░██  ░███████ "
-  echo "  ░█████████ ░██    ░██  ░██  ░██  ░██    ░██ ░██    ░██ ░██ ░██    ░██"
-  echo "  ░██        ░██    ░██  ░██  ░██  ░██    ░██ ░██    ░██ ░██ ░██       "
-  echo "  ░██         ░███████  ░██    ░██ ░██    ░██  ░███████  ░██  ░███████ "
-  echo ""
-  echo "  ╔══════════════════════════════════════════╗"
-  echo "  ║       macOS Network Hardening Netlib     ║"
-  echo "  ║            v0.16  ·  by Gr3y-foX         ║"
-  echo "  ║       ARM/M-chip  |  strict mode         ║"
-  echo "  ╠══════════════════════════════════════════╣"
-  echo "  ║  module: netlib   |  mode: interactive   ║"
-  echo "  ╠══════════════════════════════════════════╣"
-  echo "  ║  [!] Unauthorized use is prohibited.     ║"
-  echo "  ╚══════════════════════════════════════════╝"
-  echo ""
-  warn "This module modifies network settings. Sudo may be required."
-  info "Tip: usually sourced from profiles (vpn_daily / paranoid_tor)."
-  echo ""
-  ask "Continue?" CONFIRM
-  [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]] && { echo "Aborted."; exit 0; }
-  echo ""
-  
-# ── Snapshot before any changes ──────────
-ask "Create backup snapshot before proceeding?" CONFIRM_BK
-if [[ "$CONFIRM_BK" == "y" || "$CONFIRM_BK" == "Y" ]]; then
-  create_net_backup
-else
-  warn "Skipping backup — proceeding without snapshot."
-  echo ""
-fi
-
-  while true; do
+    clear
+    echo ""
+    echo "  ░██████████                      ░██                   ░██           "
+    echo "  ░██                              ░██                   ░██           "
+    echo "  ░██         ░███████  ░██    ░██ ░████████   ░███████  ░██  ░███████ "
+    echo "  ░█████████ ░██    ░██  ░██  ░██  ░██    ░██ ░██    ░██ ░██ ░██    ░██"
+    echo "  ░██        ░██    ░██  ░██  ░██  ░██    ░██ ░██    ░██ ░██ ░██       "
+    echo "  ░██         ░███████  ░██    ░██ ░██    ░██  ░███████  ░██  ░███████ "
+    echo ""
     echo "  ╔══════════════════════════════════════════╗"
-    echo "  ║           Network Hardening Menu         ║"
+    echo "  ║       macOS Network Hardening Netlib     ║"
+    echo "  ║            v0.17.4 ·  by Gr3y-foX       ║"
+    echo "  ║       ARM/M-chip  |  strict mode         ║"
     echo "  ╠══════════════════════════════════════════╣"
-    echo "  ║  [1]  Install + enable dnscrypt-proxy    ║"
-    echo "  ║  [2]  Enable PF DNS leak lock            ║"
-    echo "  ║       (ports 53/853 — IPv4/IPv6 BLOCKED) ║"
-    echo "  ║  [3]  Update /etc/hosts blocklist        ║"
-    echo "  ║       (StevenBlack)                      ║"
-    echo "  ║  [4]  Install Privoxy + VPN auto-switch  ║"
-    echo "  ║  [5]  Reset network hardening            ║"
-    echo "  ║       (dnscrypt / PF / Privoxy / proxy)  ║"
+    echo "  ║  module: netlib   |  mode: interactive   ║"
     echo "  ╠══════════════════════════════════════════╣"
-    echo "  ║  [6]  Quit                               ║"
+    echo "  ║  [!] Unauthorized use is prohibited.     ║"
     echo "  ╚══════════════════════════════════════════╝"
     echo ""
-    read -rp "  Choice (1-6): " CHOICE
+    warn "This module modifies network settings. Sudo may be required."
+    info "Tip: usually sourced from profiles (vpn_daily / paranoid_tor)."
+    echo ""
+    
+    # L-2: Sudo keepalive
+    info "This script requires sudo for system modifications."
+    sudo -v || die "sudo authentication failed."
+    while true; do sudo -n true; sleep 55; done &
+    SUDO_KEEPALIVE_PID=$!
+    trap 'kill $SUDO_KEEPALIVE_PID 2>/dev/null' EXIT
+    
+    ask "Continue?" CONFIRM
+    [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]] && { echo "Aborted."; exit 0; }
     echo ""
 
-    case "$CHOICE" in
-      1)
-        log "[1] dnscrypt-proxy setup"
-        install_dnscrypt
-        enable_dnscrypt
+    ask "Create backup snapshot before proceeding?" CONFIRM_BK
+    if [[ "$CONFIRM_BK" == "y" || "$CONFIRM_BK" == "Y" ]]; then
+        create_net_backup
+    else
+        warn "Skipping backup — proceeding without snapshot."
         echo ""
-        ;;
-      2)
-        log "[2] PF DNS leak lock"
-        prepare_pf_dns_lock_anchor
-        enable_pf_dns_lock
+    fi
+
+    while true; do
+        echo "  ╔══════════════════════════════════════════╗"
+        echo "  ║           Network Hardening Menu         ║"
+        echo "  ╠══════════════════════════════════════════╣"
+        echo "  ║  [1]  Enable PF DNS leak lock            ║"
+        echo "  ║       (ports 53/853 — IPv4/IPv6 BLOCKED) ║"
+        echo "  ║  [2]  Update /etc/hosts blocklist        ║"
+        echo "  ║       (StevenBlack)                      ║"
+        echo "  ║  [3]  Install Privoxy + VPN auto-switch  ║"
+        echo "  ║  [4]  Disable network hardening         ║"
+        echo "  ║       (PF / Privoxy / proxy)             ║"
+        echo "  ║  [5]  DNS Stack Health Check             ║"
+        echo "  ╠══════════════════════════════════════════╣"
+        echo "  ║  [6]  Quit                               ║"
+        echo "  ╚══════════════════════════════════════════╝"
         echo ""
-        ;;
-      3)
-        log "[3] StevenBlack /etc/hosts blocklist"
-        update_hosts_blocklist
+        read -rp "  Choice (1-6): " CHOICE
         echo ""
-        ;;
-      4)
-        log "[4] Privoxy + VPN auto-switch"
-        install_privoxy
-        configure_privoxy_vpn_bypass
-        enable_privoxy_vpn_autoswitch
-        echo ""
-        ;;
-      5)
-        warn "[5] RESET: disabling dnscrypt, PF DNS lock, Privoxy auto-switch, clearing proxies"
-        ask "Are you sure? This will revert network hardening changes." CONFIRM_RESET
-        if [[ "$CONFIRM_RESET" == "y" || "$CONFIRM_RESET" == "Y" ]]; then
-          reset_net_hardening
-        else
-          log "Reset aborted."
-        fi
-        echo ""
-        ;;
-      6)
-        echo "Done. Stay paranoid. 🔒"
-        exit 0
-        ;;
-      *)
-        warn "Invalid choice. Please select 1-6."
-        echo ""
-        ;;
-    esac
-  done
+
+        case "$CHOICE" in
+            1)
+                log "[1] PF DNS leak lock"
+                prepare_pf_dns_lock_anchor
+                enable_pf_dns_lock || warn "PF DNS lock was not enabled."
+                echo ""
+                ;;
+            2)
+                log "[2] StevenBlack /etc/hosts blocklist"
+                update_hosts
+                echo ""
+                ;;
+            3)
+                log "[3] Privoxy + VPN auto-switch"
+                install_privoxy
+                configure_privoxy_vpn_bypass
+                enable_privoxy_vpn_autoswitch
+                echo ""
+                ;;
+            4)
+                warn "[4] DISABLE: disabling PF DNS lock, Privoxy auto-switch, clearing proxies"
+                ask "Are you sure? This will disable network hardening (does not restore backup)." CONFIRM_RESET
+                if [[ "$CONFIRM_RESET" == "y" || "$CONFIRM_RESET" == "Y" ]]; then
+                    reset_net_hardening
+                else
+                    log "Reset aborted."
+                fi
+                echo ""
+                ;;
+            5)
+                verify_dns_stack
+                ;;
+            6)
+                echo "Done. Stay paranoid. 🔒"
+                exit 0
+                ;;
+            *)
+                warn "Invalid choice. Please select 1-6."
+                echo ""
+                ;;
+        esac
+    done
 }
 
-# If the file is run directly (rather than via `source`), open the menu
-# Check if we're being sourced by testing if $0 is the script name
 if [[ "${0##*/}" == "mac-hardening-netlib.sh" ]]; then
-  main
+    # Re-exec natively if run from a Rosetta (x86_64) shell
+    if [[ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" == "1" ]]; then
+        exec arch -arm64 /bin/bash "$0" "$@"
+    fi
+    main
 fi
-
-

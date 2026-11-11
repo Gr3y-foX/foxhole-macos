@@ -1,0 +1,181 @@
+== T0 static
+  PASS: bash -n mac-hardening-netlib.sh
+  PASS: bash -n vpn_daily.sh
+  PASS: bash -n mac-hardening-install.sh
+== T1 baseline
+root:wheel 644
+  PASS: pf.conf root:wheel 644
+  PASS: no hardening lines in pf.conf
+  PASS: PF disabled at baseline
+  PASS: main ruleset evaluates com.apple/*
+  info: direct internet egress: yes
+== T2 prepare + enable
+[+] Writing PF anchor for DNS leak prevention: /etc/pf.anchors/com.hardening.dnsleak
+[i] Physical interfaces scoped for DNS block: en0 en1
+[+]   [✓] PF anchor written: /etc/pf.anchors/com.hardening.dnsleak
+  PASS: rules file exists
+  PASS: rules syntax ok (pfctl -nf)
+  PASS: block rules scoped (on {)
+[+] Enabling PF DNS leak lock...
+[!] WARNING: Blocks direct DNS (53/853 v4/v6).
+[!] Ensure Quad9 DoH profile is already installed.
+[+]   [✓] PF LaunchDaemon installed (re-applies the lock at boot)
+[+] PF DNS lock: ACTIVE ✓ (anchor com.apple/foxhole.dnsleak)
+  PASS: pf.conf untouched
+  PASS: main ruleset untouched
+  PASS: rules loaded in com.apple/foxhole.dnsleak (port 53)
+  PASS: utun pass rules loaded (utun0..utun15)
+  PASS: PF enabled
+  PASS: exactly one PF reference held
+  PASS: token file root 600, token is held
+  PASS: helper root:wheel 755
+  PASS: LaunchDaemon bootstrapped
+  PASS: helper status = active
+== T3 behaviour
+pass out quick on utun0 all flags S/SA keep state
+pass out quick on utun1 all flags S/SA keep state
+pass out quick on utun2 all flags S/SA keep state
+pass out quick on utun3 all flags S/SA keep state
+pass out quick on utun4 all flags S/SA keep state
+pass out quick on utun5 all flags S/SA keep state
+pass out quick on utun6 all flags S/SA keep state
+pass out quick on utun7 all flags S/SA keep state
+pass out quick on utun8 all flags S/SA keep state
+pass out quick on utun9 all flags S/SA keep state
+pass out quick on utun10 all flags S/SA keep state
+pass out quick on utun11 all flags S/SA keep state
+pass out quick on utun12 all flags S/SA keep state
+pass out quick on utun13 all flags S/SA keep state
+pass out quick on utun14 all flags S/SA keep state
+pass out quick on utun15 all flags S/SA keep state
+pass in quick on utun0 all flags S/SA keep state
+pass in quick on utun1 all flags S/SA keep state
+pass in quick on utun2 all flags S/SA keep state
+pass in quick on utun3 all flags S/SA keep state
+  info: udp/53 block-rule packets after dig @8.8.8.8: 8
+  PASS: DNS to 8.8.8.8 hits the block rule
+  PASS: plain DNS @8.8.8.8 blocked
+  PASS: Quad9 @9.9.9.9 allowed
+  PASS: HTTPS by IP still works during lock
+== T4 idempotence + coexistence
+  PASS: second enable: still one reference
+  PASS: rules survive a main-ruleset reload (pfctl -f /etc/pf.conf)
+  PASS: daemon re-run: still one reference
+  info: second PF user (like a VPN kill switch) took token 14304992223037598735
+== T5 verify_dns_stack completes
+[✗]   [1] Quad9 Profile active
+[i]        Expected pattern: '9\.9\.9'
+[i]        Got: DNS configuration
+[+]   [2] PF utun pass rule present ✓
+[✗]   [3] Basic DNS resolution
+[i]        Expected pattern: '[0-9]'
+[i]        Got: ;; connection timed out; no servers could be reached
+[✗]   [4] DNSSEC (ad flag)
+[i]        Expected pattern: ' ad'
+[i]        Got: 
+[✗]   [5] DNSSEC validation (SERVFAIL on bad domain)
+[i]        Expected pattern: 'SERVFAIL'
+[i]        Got: 
+[✗]   [6] Quad9 DoH reachability
+[i]        Expected pattern: 'Yes'
+[i]        Got: 
+[+]   [7] Plain DNS blocked (@8.8.8.8) ✓
+[+]   [8] Split DNS configuration
+[+]   [9] pf firewall enabled
+[✗]   [10] StevenBlack hosts (0 entries — too few)
+  Results: 4/10 passed, 6 failed
+[!] 6 check(s) failed — review above.
+  PASS: health check reached summary
+  PASS: [2] utun rule found via anchor
+== T6 disable
+[+] Disabling PF DNS leak lock...
+[i] PF stays enabled: another program holds a reference (sudo pfctl -s References).
+[+] PF DNS lock removed.
+  PASS: PF stays on for the other holder
+  PASS: PF off once the other holder releases
+  PASS: pf.conf still equals baseline
+  PASS: rules flushed
+  PASS: files removed (rules, helper, token, plist)
+  PASS: LaunchDaemon gone
+  PASS: plain DNS @8.8.8.8 works again
+== T7 migration from a pre-0.17.3 install (pf.conf marker + com.hardening.dnsleak)
+  PASS: legacy anchor active before migration
+[i] Removing the DNS lock lines an older version added to /etc/pf.conf...
+[+]   [✓] /etc/pf.conf restored (backup saved next to it)
+[+] PF DNS lock: ACTIVE ✓ (anchor com.apple/foxhole.dnsleak)
+  PASS: migration: pf.conf back to baseline
+  PASS: migration: pf.conf root:wheel 644
+  PASS: migration: legacy anchor flushed
+  PASS: migration: new lock active
+  PASS: migration: disable leaves no hardening lines
+== T8 guard: main ruleset without com.apple/*
+[✗] PF main ruleset does not evaluate anchor "com.apple/*" — the lock would never apply.
+[i] A custom /etc/pf.conf or another tool replaced it. Inspect: sudo pfctl -sr
+  PASS: enable refuses (rc != 0)
+  PASS: no daemon installed on refusal
+  PASS: stock main ruleset restored
+== T9 reset_net_hardening re-run on clean state
+  PASS: reset exits 0
+  PASS: PF off after reset
+== T11 full stack with internet: Quad9 resolver + hosts blocklist + lock (needs egress)
+  PASS: hosts blocklist installed (>1000 entries)
+  PASS: hosts: marker exactly once
+  PASS: hosts: localhost entries kept
+  PASS: hosts: a listed ad domain resolves to 0.0.0.0
+  PASS: resolver works through the lock
+  PASS: plain DNS to 8.8.8.8 blocked, resolver 9.9.9.9 still fine
+[+]   [1] Quad9 Profile active
+[+]   [2] PF utun pass rule present ✓
+[+]   [3] Basic DNS resolution
+[+]   [4] DNSSEC (ad flag)
+[+]   [5] DNSSEC validation (SERVFAIL on bad domain)
+[+]   [6] Quad9 DoH reachability
+[+]   [7] Plain DNS blocked (@8.8.8.8) ✓
+[+]   [8] Split DNS configuration
+[+]   [9] pf firewall enabled
+[+]   [10] StevenBlack hosts (77759 entries) ✓
+  Results: 10/10 passed, 0 failed
+[+] All checks passed. Stack is healthy. ✓
+  PASS: health check: all 10 pass
+  PASS: hosts: second update keeps one marker
+bash: /usr/local/libexec/foxhole-pf-dnslock: No such file or directory
+  PASS: reset: blocklist and lock gone
+  PASS: reset: /etc/hosts still has localhost
+  PASS: reset: PF off
+== T12 tunnel: utun with IPv4 + route through it, lock on (no internet needed)
+  PASS: no VPN detected before the tunnel exists
+  PASS: route to 203.0.113.53 goes via utun3
+  info: packets on the utun3 pass rule: 1
+  PASS: DNS through the tunnel passes the utun3 rule
+  PASS: vpn_active (proxy-toggle) sees the utun IPv4 tunnel
+  PASS: no VPN detected after the tunnel is gone
+== T14 ask() with FOXHOLE_ASSUME_YES (real netlib ask, no tty)
+  PASS: ask answers y without a tty when FOXHOLE_ASSUME_YES=1
+  PASS: ask still answers N without a tty by default
+  PASS: ask rejects command substitution in the variable name use (printf -v, no eval)
+== T13 Privoxy auto-switch: real proxy-toggle.sh + LaunchDaemon + networksetup (stand-in listener on :8118)
+[+] LaunchDaemon loaded — proxy auto-switches on VPN.
+[+] Privoxy: loopback only ✓
+  PASS: toggle script root:wheel 755
+  PASS: daemon bootstrapped
+  PASS: no VPN + Privoxy listening -> web and secure web proxy ON
+  PASS: proxy points at 127.0.0.1:8118
+  PASS: repeat runs change nothing (idempotent, log does not grow)
+  PASS: VPN (utun IPv4) -> proxy OFF
+  PASS: VPN gone -> proxy back ON
+  PASS: Privoxy not listening -> proxy OFF (never point at a dead port)
+  PASS: toggle logged the dead-Privoxy case
+  PASS: Privoxy back -> proxy ON again
+  PASS: disable: daemon, plist and script gone
+  PASS: disable: system proxies OFF
+== T10 vpn_daily.sh menu from another cwd (driven by expect: ask() needs a tty)
+  PASS: vpn_daily [4] prints guidance
+  PASS: vpn_daily [1] reports lock ACTIVE
+  PASS: vpn_daily [2] removes lock
+  PASS: vpn_daily exits cleanly
+  PASS: no 'command not found' in vpn_daily output
+  PASS: no leftovers after vpn_daily
+
+RESULT: 84 passed, 0 failed, 0 skipped
+vmtest exit: 0
+ssh exit: 0

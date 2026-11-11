@@ -1,0 +1,34 @@
+name: lint
+
+on:
+  push:
+    branches: [debug, main]
+  pull_request:
+
+jobs:
+  # Linux runners are always available: syntax + shellcheck give a signal even
+  # when the macOS runners are out of capacity.
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check
+        run: |
+          for f in mac-hardening-install.sh mac-hardening-netlib.sh vpn_daily.sh tests/vm/*.sh tests/ci/*.sh; do
+            bash -n "$f" && echo "ok  $f"
+          done
+      - name: shellcheck
+        run: shellcheck -S warning mac-hardening-install.sh mac-hardening-netlib.sh vpn_daily.sh tests/vm/*.sh tests/ci/*.sh
+
+  # Needs macOS: bash 3.2 syntax and tests that call macOS tools (networksetup, sysctl).
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check with the stock macOS bash (3.2)
+        run: |
+          for f in mac-hardening-install.sh mac-hardening-netlib.sh vpn_daily.sh tests/vm/*.sh tests/ci/*.sh; do
+            /bin/bash -n "$f" && echo "ok  $f"
+          done
+      - name: Offline tests (stubbed sudo, no system changes)
+        run: /bin/bash tests/ci/offline.sh

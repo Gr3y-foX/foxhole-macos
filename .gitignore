@@ -1,2 +1,4 @@
 dev_note/de_note_16.4.md
 debug/
+# Local backups (git bundles, archives): never committed
+/backups/
