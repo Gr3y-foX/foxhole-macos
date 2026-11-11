@@ -17,6 +17,19 @@ The clean image (no Homebrew) was not run this time.
 | T25 (new, F16) reset with a failing step | pass: the failure is reported and the reset completes |
 | T26 (new, scenario A) reboot with the lock on, no VPN | pass: the LaunchDaemon's `boot` action succeeded on the first try, one PF reference, the stock main ruleset is loaded, DNS to 8.8.8.8 hits the block rule, HTTPS by IP works, disable leaves nothing behind |
 
+## Update 2026-11-11
+
+Fresh run after the helper-directory check, the disable fallback and the `update_hosts`
+changes: **166 passed / 0 failed / 0 skipped**, then **12 / 0 / 0 after a reboot**
+(`../logs/vm-test-2026-11-11_005737.log`). Offline 46/46.
+
+- T20 changed with the product: disable now completes when the helper install fails
+  (it releases the PF reference itself), so the test expects rc 0 and no leftovers.
+- T27 (new): enable refuses a user-owned or group-writable `/usr/local/libexec`, loads
+  nothing, and works again with root:wheel 755.
+- T11: `update_hosts` completes under `set -e` when the GitHub commit lookup fails; the
+  root-owned staging copy is removed.
+
 ## The earlier run today
 
 `../logs/vm-test-2026-11-10_195315.log`: 157 / 2 failed (after reboot 12 / 0).

@@ -389,7 +389,17 @@ EOF
 
 # Helper shared by enable, disable and the boot LaunchDaemon (one code path)
 _install_pf_helper() {
-    sudo mkdir -p "$(dirname "$PF_LOCK_HELPER")"
+    local HELPER_DIR
+    HELPER_DIR="$(dirname "$PF_LOCK_HELPER")"
+    sudo mkdir -p "$HELPER_DIR"
+    # Root runs the helper at every boot: its directory must not be writable by
+    # anyone else (parts of /usr/local are user-owned on Intel Homebrew layouts)
+    local DIR_OWNER DIR_MODE
+    DIR_OWNER=$(stat -f '%Su' "$HELPER_DIR" 2>/dev/null || true)
+    DIR_MODE=$(stat -f '%Lp' "$HELPER_DIR" 2>/dev/null || true)
+    if [[ "$DIR_OWNER" != "root" || ! "$DIR_MODE" =~ ^[0-7]?[0-7][0145][0145]$ ]]; then
+        die "${HELPER_DIR} is not root-only writable (owner ${DIR_OWNER:-?}, mode ${DIR_MODE:-?}). Fix: sudo chown root:wheel ${HELPER_DIR} && sudo chmod 755 ${HELPER_DIR}"
+    fi
     # Streamed to root (no user-owned staging file): root runs this at every boot
     if ! sudo tee "${PF_LOCK_HELPER}.new" >/dev/null <<'HELPER'
 #!/bin/bash
@@ -714,10 +724,19 @@ disable_pf_dns_lock() {
     # Flush before anything below can fail: the block rules must not outlive a failed disable
     sudo pfctl -a "$PF_LOCK_ANCHOR" -F all >/dev/null 2>&1 || true
 
-    # Re-install first so the current stop logic runs even if the helper is missing
-    _install_pf_helper
-    sudo /bin/bash "$PF_LOCK_HELPER" stop >/dev/null \
-        || warn "PF lock helper stop failed"
+    # Re-install first so the current stop logic runs even if the helper is missing.
+    # In a subshell: a die in there must not stop the removal half-way.
+    if ( _install_pf_helper ); then
+        sudo /bin/bash "$PF_LOCK_HELPER" stop >/dev/null \
+            || warn "PF lock helper stop failed"
+    else
+        warn "PF lock helper could not be installed; releasing the PF reference directly."
+        local REF
+        REF=$(sudo cat "$PF_LOCK_TOKEN" 2>/dev/null || true)
+        if [[ "$REF" =~ ^[0-9]+$ ]]; then
+            sudo pfctl -X "$REF" >/dev/null 2>&1 || true
+        fi
+    fi
     sudo rm -f "$PF_LOCK_HELPER" "${PF_LOCK_HELPER}.new" "$PF_LOCK_RULES" "$PF_LOCK_RULES_NEW" "$PF_LOCK_TOKEN"
 
     _pf_legacy_cleanup
@@ -742,6 +761,9 @@ update_hosts() {
     local MIN_LINES=50
     local HAS_BLOCKLIST=false
     local TMP_HOSTS
+    # Root-owned copy of the download: validated, hashed and applied from here, so
+    # the user-owned download file cannot be swapped after the checks
+    local STAGED="/etc/hosts.foxhole.download"
 
     log "Checking /etc/hosts..."
 
@@ -783,21 +805,24 @@ update_hosts() {
     if ! curl -fsSL "$HOSTS_URL" -o "$TMP_HOSTS"; then
         rm -f "$TMP_HOSTS"; die "Failed to download StevenBlack hosts! /etc/hosts unchanged."
     fi
+    sudo install -m 644 -o root -g wheel "$TMP_HOSTS" "$STAGED" \
+        || { rm -f "$TMP_HOSTS"; die "Failed to stage the download. /etc/hosts unchanged."; }
+    rm -f "$TMP_HOSTS"
     local NEW_LINES
-    NEW_LINES=$(grep -c "^0\.0\.0\.0 " "$TMP_HOSTS" || true)
+    NEW_LINES=$(grep -c "^0\.0\.0\.0 " "$STAGED" || true)
     if [[ "${NEW_LINES:-0}" -lt 1000 ]]; then
-        rm -f "$TMP_HOSTS"
+        sudo rm -f "$STAGED"
         die "Downloaded file has only ${NEW_LINES:-0} block entries — not a hosts blocklist? /etc/hosts unchanged."
     fi
 
     # SHA-256 + [M-4]: inform user about last commit
     local SHA256
-    SHA256=$(shasum -a 256 "$TMP_HOSTS" | awk '{print $1}')
+    SHA256=$(shasum -a 256 "$STAGED" | awk '{print $1}')
     info "SHA-256: ${SHA256}"
     local LATEST_COMMIT
     LATEST_COMMIT=$(curl -fsSL \
         "https://api.github.com/repos/StevenBlack/hosts/commits?path=hosts&per_page=1" \
-        2>/dev/null | grep '"sha"' | head -1 | awk -F'"' '{print $4}' | cut -c1-7)
+        2>/dev/null | grep '"sha"' | head -1 | awk -F'"' '{print $4}' | cut -c1-7) || true
     info "Latest GitHub commit: ${LATEST_COMMIT:-unknown}"
     info "Verify at: https://github.com/StevenBlack/hosts/commits/master/hosts"
 
@@ -819,10 +844,10 @@ update_hosts() {
         printf "# Source:  %s\n" "$HOSTS_URL"
         printf "# SHA-256: %s\n" "$SHA256"
         printf "# Commit:  %s\n" "${LATEST_COMMIT:-unknown}"
-        cat "$TMP_HOSTS"
+        cat "$STAGED"
     } | sudo tee -a "$HOSTS_FILE" > /dev/null
 
-    rm -f "$TMP_HOSTS"
+    sudo rm -f "$STAGED"
     sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder 2>/dev/null || true
 
     local TOTAL

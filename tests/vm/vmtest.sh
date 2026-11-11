@@ -186,6 +186,10 @@ else
     chk "health check: all 10 pass" 'echo "$OUT" | grep -q "Results: 10/10 passed, 0 failed"'
     update_hosts >/tmp/hosts2.out 2>&1
     chk "hosts: second update keeps one marker" '[[ "$(grep -cF "# ===== StevenBlack Blocklist =====" /etc/hosts)" == 1 ]]'
+    # set -e as in the real scripts: the commit lookup is informational and must not end the run
+    ( set -e; curl() { case "$*" in *api.github.com*) return 22 ;; *) command curl "$@" ;; esac; }; update_hosts ) >/tmp/hosts3.out 2>&1; RC=$?
+    chk "hosts: update completes when the GitHub commit lookup fails" '[[ $RC -eq 0 ]] && grep -q "Latest GitHub commit: unknown" /tmp/hosts3.out && grep -q "/etc/hosts updated" /tmp/hosts3.out && [[ "$(grep -cF "# ===== StevenBlack Blocklist =====" /etc/hosts)" == 1 ]]'
+    chk "hosts: root-owned staging copy removed, blocklist still complete" '! sudo test -e /etc/hosts.foxhole.download && [[ "$(grep -c "^0\.0\.0\.0" /etc/hosts)" -gt 1000 ]]'
     reset_net_hardening >/dev/null 2>&1
     sudo networksetup -setdnsservers "$SVC" Empty
     chk "reset: blocklist and lock gone" '! grep -qF "StevenBlack Blocklist" /etc/hosts && ! sudo bash $HELPER status'
@@ -404,12 +408,28 @@ fi
 echo "== T20 disable still unlocks when the helper re-install fails (audit F2)"
 prepare_pf_dns_lock_anchor >/dev/null 2>&1; enable_pf_dns_lock >/dev/null 2>&1
 chk "T20 setup: lock active" 'sudo bash $HELPER status'
-( _install_pf_helper() { die "simulated helper install failure"; }; disable_pf_dns_lock ) > /tmp/t20.out 2>&1; RC=$?
-chk "disable aborted inside the helper install (rc != 0, never reached 'removed')" '[[ $RC -ne 0 ]] && grep -q "simulated helper install failure" /tmp/t20.out && ! grep -q "PF DNS lock removed" /tmp/t20.out'
-chk "block rules are flushed anyway" '! pfq -a $A -sr | grep -q .'
-chk "boot daemon and plist are gone anyway" '! test -e $PLIST && ! sudo launchctl print system/com.hardening.pf.dnsleak >/dev/null 2>&1'
+# Since the helper-directory check, disable no longer aborts here: it releases the reference itself
+( set -e; _install_pf_helper() { die "simulated helper install failure"; }; disable_pf_dns_lock ) > /tmp/t20.out 2>&1; RC=$?
+chk "disable completes although the helper install failed" '[[ $RC -eq 0 ]] && grep -q "simulated helper install failure" /tmp/t20.out && grep -q "releasing the PF reference directly" /tmp/t20.out && grep -q "PF DNS lock removed" /tmp/t20.out'
+chk "block rules flushed, PF off, no reference left" '! pfq -a $A -sr | grep -q . && ! pf_on && [[ "$(ntokens)" == 0 ]]'
+chk "boot daemon and plist gone" '! test -e $PLIST && ! sudo launchctl print system/com.hardening.pf.dnsleak >/dev/null 2>&1'
+chk "no leftovers (rules, helper, token)" '! test -e $RULES && ! test -e $HELPER && ! sudo test -e $TOKEN'
+
+echo "== T27 helper directory must be root-only writable"
+sudo chown admin /usr/local/libexec
+prepare_pf_dns_lock_anchor >/dev/null 2>&1
+( set -e; enable_pf_dns_lock ) > /tmp/t27.out 2>&1; RC=$?
+sed 's/\x1b\[[0-9;]*m//g' /tmp/t27.out | grep "✗" | head -2
+chk "user-owned helper directory: enable refuses and names the fix" '[[ $RC -ne 0 ]] && grep -q "is not root-only writable" /tmp/t27.out && grep -q "sudo chown root:wheel /usr/local/libexec" /tmp/t27.out'
+chk "refusal: no helper, no plist, no rules loaded, PF off" '! test -e $HELPER && ! test -e $HELPER.new && ! test -e $PLIST && ! pfq -a $A -sr | grep -q . && ! pf_on'
+sudo chown root:wheel /usr/local/libexec; sudo chmod 775 /usr/local/libexec
+( set -e; enable_pf_dns_lock ) > /tmp/t27b.out 2>&1; RC=$?
+chk "group-writable helper directory: enable refuses" '[[ $RC -ne 0 ]] && grep -q "is not root-only writable" /tmp/t27b.out && ! pf_on'
+sudo chmod 755 /usr/local/libexec
+enable_pf_dns_lock >/dev/null 2>&1
+chk "root:wheel 755 directory: enable works" 'sudo bash $HELPER status'
 disable_pf_dns_lock >/dev/null 2>&1
-chk "a second disable completes: PF off, no leftovers" '! pf_on && ! test -e $RULES && ! test -e $HELPER && ! sudo test -e $TOKEN'
+chk "T27 cleanup: PF off, no leftovers" '! pf_on && ! test -e $RULES && ! test -e $HELPER'
 
 echo "== T21 failed enable rolls back to 'lock off' (audit F3, F11)"
 prepare_pf_dns_lock_anchor >/dev/null 2>&1

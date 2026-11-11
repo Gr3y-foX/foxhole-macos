@@ -17,7 +17,7 @@ These scripts change **live system state** (firewall, `/etc/pf.conf`, `/etc/host
 | `vpn_daily.sh` | "VPN Daily" profile: sources the netlib (path resolved from the script), menu for the PF DNS lock, health check and reset. |
 | `profile-paranoid-tor.sh` | Stub (header only). Planned Tor/PF/Privoxy profile. |
 | `tests/ci/offline.sh` | Offline checks (sudo shimmed, nothing touches the system). Run by CI. |
-| `tests/vm/` | Tart VM suite: `run.sh` (full run, log to `docs/testing/logs/`), `vm.sh` (ad-hoc VM work), `vmtest.sh` (runs inside the VM, sections T0–T26; `run.sh` reboots the VM and runs `vmtest.sh --after-reboot` for T26). |
+| `tests/vm/` | Tart VM suite: `run.sh` (full run, log to `docs/testing/logs/`), `vm.sh` (ad-hoc VM work), `vmtest.sh` (runs inside the VM, sections T0–T27; `run.sh` reboots the VM and runs `vmtest.sh --after-reboot` for T26). |
 | `.github/workflows/lint.yml` | CI: shellcheck (Linux), bash 3.2 syntax + `tests/ci/offline.sh` (macOS). |
 | `docs/` | `changelog/` (release notes), `testing/` (README, `reports/`, `logs/`), `dev/` (maintainer working notes: start at `dev/CHECKPOINT.md`), `archive/` (old copies, audits). Index: `docs/README.md`. |
 | `debug/` | Local scratch (git-ignored): drawings, notes. Not shipped. |

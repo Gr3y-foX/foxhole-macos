@@ -94,6 +94,20 @@ chk "LaunchDaemon plist is well-formed and runs the helper's boot action" \
 chk "LaunchDaemon writer reports failure to its caller (F3)" '[[ "$(grep -c "return 1" "$T/ld.fn")" -ge 3 ]]'
 chk "no user-owned staging files left in the PF lock code (F14)" \
     '[[ "$(grep -c "mktemp" "$REPO/mac-hardening-netlib.sh")" == 1 ]] && grep -q "TMP_HOSTS=\$(mktemp)" "$REPO/mac-hardening-netlib.sh"'
+sed -n '/^update_hosts() {/,/^}/p' "$REPO/mac-hardening-netlib.sh" > "$T/hosts.fn"
+chk "hosts download is validated and applied from a root-owned copy" \
+    'grep -q "install -m 644 -o root -g wheel \"\$TMP_HOSTS\" \"\$STAGED\"" "$T/hosts.fn" && grep -q "cat \"\$STAGED\"" "$T/hosts.fn" && ! grep -q "cat \"\$TMP_HOSTS\"" "$T/hosts.fn"'
+chk "hosts: a failed commit lookup does not end the script" 'grep -q "cut -c1-7) || true" "$T/hosts.fn"'
+chk "helper directory must be root-only writable" 'grep -q "is not root-only writable" "$REPO/mac-hardening-netlib.sh"'
+(
+    stat() { echo "${FAKE_STAT:-}"; }   # stands in for both the owner and the mode query
+    tee() { cat >/dev/null; }
+    sudo() { case "$1" in tee) cat >/dev/null ;; *) return 0 ;; esac; }
+    FAKE_STAT=root; _install_pf_helper >/dev/null 2>&1
+)
+# shellcheck disable=SC2034  # used inside the single-quoted chk string (eval)
+RC_OWNER=$?
+chk "helper install refuses when the directory check fails" '[[ $RC_OWNER -ne 0 ]]'
 chk "vpn_daily offers a backup snapshot (F17)" 'grep -q "create_net_backup" "$REPO/vpn_daily.sh"'
 chk "helper releases the reference if the token cannot be saved (F12)" \
     'grep -q "cannot write \$TOKEN_FILE; PF reference released" "$T/helper.sh"'
