@@ -226,12 +226,14 @@ echo "== T13 Privoxy auto-switch: real proxy-toggle.sh + LaunchDaemon + networks
 SVC=$(networksetup -listallnetworkservices | tail -n +2 | grep -v '^\*' | head -1)
 wproxy() { networksetup -getwebproxy "$SVC" | awk -F': ' '$1=="Enabled"{print $2}'; }
 sproxy() { networksetup -getsecurewebproxy "$SVC" | awk -F': ' '$1=="Enabled"{print $2}'; }
-toggle() { sudo bash /usr/local/bin/proxy-toggle.sh; }
+toggle() { sudo bash /usr/local/libexec/proxy-toggle.sh; }
+sudo mkdir -p /usr/local/bin; echo '# old v0.17.3 toggle' | sudo tee /usr/local/bin/proxy-toggle.sh >/dev/null
 fake_privoxy() { perl -MIO::Socket::INET -e '$s=IO::Socket::INET->new(LocalAddr=>"127.0.0.1",LocalPort=>8118,Listen=>5,ReuseAddr=>1) or die; alarm 900; while ($c=$s->accept) { close $c }' >/dev/null 2>&1 & }
 fake_privoxy
 LPID=$!; sleep 1
 enable_privoxy_vpn_autoswitch 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | grep -E "✗|\[!\]|loopback|exposed|not listening|loaded"
-chk "toggle script root:wheel 755" '[[ "$(stat -f "%Su:%Sg %Lp" /usr/local/bin/proxy-toggle.sh)" == "root:wheel 755" ]]'
+chk "toggle script root:wheel 755" '[[ "$(stat -f "%Su:%Sg %Lp" /usr/local/libexec/proxy-toggle.sh)" == "root:wheel 755" ]]'
+chk "toggle moved: plist runs /usr/local/libexec, old /usr/local/bin copy removed, no .new left" 'grep -q "<string>/usr/local/libexec/proxy-toggle.sh</string>" /Library/LaunchDaemons/com.hardening.proxytoggle.plist && ! test -e /usr/local/bin/proxy-toggle.sh && ! test -e /usr/local/libexec/proxy-toggle.sh.new'
 chk "daemon bootstrapped" 'sudo launchctl print system/com.hardening.proxytoggle >/dev/null 2>&1'
 sleep 8   # the daemon re-runs once after its own proxy changes (WatchPath, ThrottleInterval 5)
 chk "no VPN + Privoxy listening -> web and secure web proxy ON" '[[ "$(wproxy)" == Yes && "$(sproxy)" == Yes ]]'
@@ -250,7 +252,7 @@ LPID=$!; sleep 1; toggle
 chk "Privoxy back -> proxy ON again" '[[ "$(wproxy)" == Yes ]]'
 disable_privoxy_autoswitch >/dev/null 2>&1
 kill $LPID 2>/dev/null; wait $LPID 2>/dev/null
-chk "disable: daemon, plist and script gone" '! sudo launchctl print system/com.hardening.proxytoggle >/dev/null 2>&1 && ! test -e /Library/LaunchDaemons/com.hardening.proxytoggle.plist && ! test -e /usr/local/bin/proxy-toggle.sh'
+chk "disable: daemon, plist and script gone" '! sudo launchctl print system/com.hardening.proxytoggle >/dev/null 2>&1 && ! test -e /Library/LaunchDaemons/com.hardening.proxytoggle.plist && ! test -e /usr/local/libexec/proxy-toggle.sh'
 chk "disable: system proxies OFF" '[[ "$(wproxy)" == No && "$(sproxy)" == No ]]'
 
 echo "== T15 installer fixes (functions extracted from mac-hardening-install.sh; needs egress)"
@@ -328,7 +330,8 @@ REAL_IF=$(networksetup -listallhardwareports | awk '/^Device: en[0-9]+$/ {print 
 sudo sed -i '' -E 's/^(block out quick on \{)[^}]*(\} )/\1 en99 \2/' $RULES
 chk "rules file now carries a stale interface list (en99 only)" 'grep -q "^block out quick on { en99 }" $RULES'
 sudo bash $HELPER start >/dev/null 2>&1
-chk "helper start re-renders the interface list (real $REAL_IF scoped, stale en99 gone)" 'pfq -a $A -sr | grep "port = 53" | grep -q "$REAL_IF" && ! pfq -a $A -sr | grep -q en99'
+# v0.17.4 (audit F7): the loaded list is the union of the live list and the file's list
+chk "helper start merges the interface list (real $REAL_IF added, en99 from the file kept)" 'pfq -a $A -sr | grep "port = 53" | grep -q "$REAL_IF" && pfq -a $A -sr | grep "port = 53" | grep -q en99'
 chk "re-render does not touch the rules file on disk" 'grep -q "^block out quick on { en99 }" $RULES'
 ls -la /var/run/foxhole-pf.* 2>&1 | sed "s/^/  info: /"
 chk "re-render leaves no temp files behind" '! ls /var/run/foxhole-pf.* >/dev/null 2>&1'
@@ -359,11 +362,11 @@ else
     enable_privoxy_vpn_autoswitch >/tmp/t18-auto.out 2>&1
     sleep 8
     chk "real Privoxy + no VPN -> proxies ON" '[[ "$(networksetup -getwebproxy "$SVC" | awk -F": " "\$1==\"Enabled\"{print \$2}")" == Yes ]]'
-    sudo ifconfig utun3 inet 10.99.0.1 10.99.0.2 netmask 255.255.255.255 up; sudo bash /usr/local/bin/proxy-toggle.sh
+    sudo ifconfig utun3 inet 10.99.0.1 10.99.0.2 netmask 255.255.255.255 up; sudo bash /usr/local/libexec/proxy-toggle.sh
     chk "real Privoxy + VPN up -> proxies OFF" '[[ "$(networksetup -getwebproxy "$SVC" | awk -F": " "\$1==\"Enabled\"{print \$2}")" == No ]]'
     sudo ifconfig utun3 inet 10.99.0.1 delete
     disable_privoxy_autoswitch >/dev/null 2>&1
-    chk "disable: proxies OFF and toggle gone" '[[ "$(networksetup -getwebproxy "$SVC" | awk -F": " "\$1==\"Enabled\"{print \$2}")" == No ]] && ! test -e /usr/local/bin/proxy-toggle.sh'
+    chk "disable: proxies OFF and toggle gone" '[[ "$(networksetup -getwebproxy "$SVC" | awk -F": " "\$1==\"Enabled\"{print \$2}")" == No ]] && ! test -e /usr/local/libexec/proxy-toggle.sh'
     pkill -x privoxy 2>/dev/null; brew services stop privoxy >/dev/null 2>&1
 fi
 

@@ -387,19 +387,21 @@ EOF
     log "  [✓] PF anchor prepared: ${PF_ANCHOR} (applied when the lock is enabled)"
 }
 
+# Root runs scripts from these directories (boot daemons): they must not be
+# writable by anyone else. Parts of /usr/local are user-owned on Intel Homebrew layouts.
+_require_root_dir() {
+    local DIR="$1" DIR_OWNER DIR_MODE
+    sudo mkdir -p "$DIR"
+    DIR_OWNER=$(stat -f '%Su' "$DIR" 2>/dev/null || true)
+    DIR_MODE=$(stat -f '%Lp' "$DIR" 2>/dev/null || true)
+    if [[ "$DIR_OWNER" != "root" || ! "$DIR_MODE" =~ ^[0-7]?[0-7][0145][0145]$ ]]; then
+        die "${DIR} is not root-only writable (owner ${DIR_OWNER:-?}, mode ${DIR_MODE:-?}). Fix: sudo chown root:wheel ${DIR} && sudo chmod 755 ${DIR}"
+    fi
+}
+
 # Helper shared by enable, disable and the boot LaunchDaemon (one code path)
 _install_pf_helper() {
-    local HELPER_DIR
-    HELPER_DIR="$(dirname "$PF_LOCK_HELPER")"
-    sudo mkdir -p "$HELPER_DIR"
-    # Root runs the helper at every boot: its directory must not be writable by
-    # anyone else (parts of /usr/local are user-owned on Intel Homebrew layouts)
-    local DIR_OWNER DIR_MODE
-    DIR_OWNER=$(stat -f '%Su' "$HELPER_DIR" 2>/dev/null || true)
-    DIR_MODE=$(stat -f '%Lp' "$HELPER_DIR" 2>/dev/null || true)
-    if [[ "$DIR_OWNER" != "root" || ! "$DIR_MODE" =~ ^[0-7]?[0-7][0145][0145]$ ]]; then
-        die "${HELPER_DIR} is not root-only writable (owner ${DIR_OWNER:-?}, mode ${DIR_MODE:-?}). Fix: sudo chown root:wheel ${HELPER_DIR} && sudo chmod 755 ${HELPER_DIR}"
-    fi
+    _require_root_dir "$(dirname "$PF_LOCK_HELPER")"
     # Streamed to root (no user-owned staging file): root runs this at every boot
     if ! sudo tee "${PF_LOCK_HELPER}.new" >/dev/null <<'HELPER'
 #!/bin/bash
@@ -460,11 +462,16 @@ start_failed() {
 do_start() {
     local RENDERED="" IFACES OUT TOKEN
     [[ -f "$RULES" ]] || { echo "rules file missing: $RULES" >&2; return 1; }
-    # Re-render the interface list of the block rules, so a NIC added since the
-    # rules were written is covered too. No temp file: the rules go to pfctl on
-    # stdin. Any failure falls back to $RULES as written.
-    IFACES=$(/usr/sbin/networksetup -listallhardwareports 2>/dev/null \
-        | awk '/^Device: en[0-9]+$/ {print $2}' | tr '\n' ' ' | sed 's/ $//')
+    # Re-render the interface list of the block rules: the union of the live list
+    # and the list in $RULES. A NIC added since the rules were written is covered,
+    # and one that is missing at boot (dongle, slow enumeration) stays covered: a
+    # name with no interface behind it matches nothing. Both inputs are filtered
+    # to en<N>, so the sed replacement below only ever sees safe names. No temp
+    # file: the rules go to pfctl on stdin. Any failure falls back to $RULES.
+    IFACES=$( { /usr/sbin/networksetup -listallhardwareports 2>/dev/null \
+                  | awk '/^Device: en[0-9]+$/ {print $2}'
+                sed -n -E 's/^block out quick on \{([^}]*)\} .*/\1/p' "$RULES" | tr ' ' '\n'
+              } | grep -E '^en[0-9]+$' | sort -u | tr '\n' ' ' | sed 's/ $//')
     if [[ -n "$IFACES" ]]; then
         RENDERED=$(sed -E "s/^(block out quick on \{)[^}]*(\} )/\1 ${IFACES} \2/" "$RULES")
         if [[ -z "$RENDERED" ]] || ! /sbin/pfctl -nf - <<< "$RENDERED" >/dev/null 2>&1; then
@@ -924,8 +931,13 @@ EOF
     log "  [✓] VPN bypass rules added"
 }
 
+# Root runs the toggle from a LaunchDaemon: it lives next to the PF helper in a
+# root-only directory. Up to v0.17.3 it was /usr/local/bin/proxy-toggle.sh.
+readonly PROXY_TOGGLE="/usr/local/libexec/proxy-toggle.sh"
+readonly PROXY_TOGGLE_LEGACY="/usr/local/bin/proxy-toggle.sh"
+
 enable_privoxy_vpn_autoswitch() {
-    local TOGGLE_SCRIPT="/usr/local/bin/proxy-toggle.sh"
+    local TOGGLE_SCRIPT="$PROXY_TOGGLE"
     local DAEMON_PLIST="/Library/LaunchDaemons/com.hardening.proxytoggle.plist"
     local TOGGLE_LOG="/var/log/proxy-toggle.log"
 
@@ -938,10 +950,9 @@ enable_privoxy_vpn_autoswitch() {
         warn "Overwriting existing proxy-toggle.sh (SHA-256: ${EXISTING_HASH})"
     fi
 
-    # /usr/local/bin does not exist on a clean Apple Silicon Mac
-    sudo mkdir -p "$(dirname "$TOGGLE_SCRIPT")" \
-        || die "Cannot create $(dirname "$TOGGLE_SCRIPT")"
-    sudo tee "$TOGGLE_SCRIPT" > /dev/null << 'SCRIPT'
+    _require_root_dir "$(dirname "$TOGGLE_SCRIPT")"
+    # Written to a root-owned *.new file, then moved: never a half-written script
+    sudo tee "${TOGGLE_SCRIPT}.new" > /dev/null << 'SCRIPT'
 #!/bin/bash
 LOG="/var/log/proxy-toggle.log"
 MAX_LOG_SIZE=5242880
@@ -1025,10 +1036,11 @@ else
     set_proxy on
 fi
 SCRIPT
-    [[ -s "$TOGGLE_SCRIPT" ]] || die "Failed to write ${TOGGLE_SCRIPT}"
-
-    sudo chown root:wheel "$TOGGLE_SCRIPT"
-    sudo chmod 755 "$TOGGLE_SCRIPT"
+    sudo test -s "${TOGGLE_SCRIPT}.new" \
+        || { sudo rm -f "${TOGGLE_SCRIPT}.new"; die "Failed to write ${TOGGLE_SCRIPT}"; }
+    { sudo chown root:wheel "${TOGGLE_SCRIPT}.new" && sudo chmod 755 "${TOGGLE_SCRIPT}.new" \
+        && sudo mv -f "${TOGGLE_SCRIPT}.new" "$TOGGLE_SCRIPT"; } \
+        || { sudo rm -f "${TOGGLE_SCRIPT}.new"; die "Failed to install ${TOGGLE_SCRIPT}"; }
     
     # CR-4: Log SHA-256 after write
     local NEW_HASH
@@ -1052,7 +1064,7 @@ SCRIPT
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/usr/local/bin/proxy-toggle.sh</string>
+        <string>/usr/local/libexec/proxy-toggle.sh</string>
     </array>
     <key>WatchPaths</key>
     <array>
@@ -1074,6 +1086,7 @@ EOF
     sudo chmod 644 "$DAEMON_PLIST"
 
     _launchd_bootout com.hardening.proxytoggle
+    sudo rm -f "$PROXY_TOGGLE_LEGACY"   # old location (<= v0.17.3)
     _launchd_bootstrap "$DAEMON_PLIST" \
         && log "LaunchDaemon loaded — proxy auto-switches on VPN." \
         || die "LaunchDaemon failed to load!"
@@ -1094,10 +1107,9 @@ EOF
 
 disable_privoxy_autoswitch() {
     local DAEMON_PLIST="/Library/LaunchDaemons/com.hardening.proxytoggle.plist"
-    local TOGGLE_SCRIPT="/usr/local/bin/proxy-toggle.sh"
     log "Disabling Privoxy VPN auto-switch..."
     _launchd_bootout com.hardening.proxytoggle
-    sudo rm -f "$DAEMON_PLIST" "$TOGGLE_SCRIPT"
+    sudo rm -f "$DAEMON_PLIST" "$PROXY_TOGGLE" "${PROXY_TOGGLE}.new" "$PROXY_TOGGLE_LEGACY"
     log "  [✓] Privoxy auto-switch disabled"
 
     # The toggle may have left services pointing at 127.0.0.1:8118

@@ -17,6 +17,18 @@ The clean image (no Homebrew) was not run this time.
 | T25 (new, F16) reset with a failing step | pass: the failure is reported and the reset completes |
 | T26 (new, scenario A) reboot with the lock on, no VPN | pass: the LaunchDaemon's `boot` action succeeded on the first try, one PF reference, the stock main ruleset is loaded, DNS to 8.8.8.8 hits the block rule, HTTPS by IP works, disable leaves nothing behind |
 
+## Update 2026-11-11, second round (F7, proxy toggle move)
+
+**167 passed / 0 failed / 0 skipped**, then **12 / 0 / 0 after a reboot**
+(`../logs/vm-test-2026-11-11_011047.log`). Offline 49/49.
+
+- T17 changed with the product (decision D2 revised): after `helper start` the loaded
+  list holds the real interface *and* the file's `en99`.
+- T13: the toggle runs from `/usr/local/libexec`, the plist points there, a planted old
+  `/usr/local/bin/proxy-toggle.sh` is removed. T18 (real Privoxy) passes with the new path.
+- Offline: the helper's merge code is run on a sample (live `en0 en5` plus an unsafe
+  name, file `en0 en9`): result `en0 en5 en9`.
+
 ## Update 2026-11-11
 
 Fresh run after the helper-directory check, the disable fallback and the `update_hosts`

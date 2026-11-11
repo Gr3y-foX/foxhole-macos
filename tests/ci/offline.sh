@@ -99,6 +99,19 @@ chk "hosts download is validated and applied from a root-owned copy" \
     'grep -q "install -m 644 -o root -g wheel \"\$TMP_HOSTS\" \"\$STAGED\"" "$T/hosts.fn" && grep -q "cat \"\$STAGED\"" "$T/hosts.fn" && ! grep -q "cat \"\$TMP_HOSTS\"" "$T/hosts.fn"'
 chk "hosts: a failed commit lookup does not end the script" 'grep -q "cut -c1-7) || true" "$T/hosts.fn"'
 chk "helper directory must be root-only writable" 'grep -q "is not root-only writable" "$REPO/mac-hardening-netlib.sh"'
+chk "helper and proxy toggle both use the root-only directory check" \
+    'sed -n "/^_install_pf_helper() {/,/^}/p" "$REPO/mac-hardening-netlib.sh" | grep -q _require_root_dir && sed -n "/^enable_privoxy_vpn_autoswitch() {/,/^}/p" "$REPO/mac-hardening-netlib.sh" | grep -q _require_root_dir'
+chk "proxy toggle lives in /usr/local/libexec; the old /usr/local/bin copy is removed" \
+    'grep -q "<string>/usr/local/libexec/proxy-toggle.sh</string>" "$REPO/mac-hardening-netlib.sh" && ! grep -q "<string>/usr/local/bin/proxy-toggle.sh</string>" "$REPO/mac-hardening-netlib.sh" && [[ "$(grep -c "PROXY_TOGGLE_LEGACY\"" "$REPO/mac-hardening-netlib.sh")" -ge 2 ]]'
+# F7: run the helper's interface merge on a sample rules file (networksetup stubbed)
+mkdir -p "$T/f7"
+printf 'pass quick on lo0 all\nblock out quick on { en0 en9 } proto { udp tcp } to any port 53\n' > "$T/f7/rules"
+printf '#!/bin/bash\nprintf "Hardware Port: Wi-Fi\\nDevice: en0\\nHardware Port: USB\\nDevice: en5\\nHardware Port: Bad\\nDevice: en1;rm\\n"\n' > "$T/f7/networksetup"
+chmod +x "$T/f7/networksetup"
+sed -n "/^    IFACES=\$( {/,/sed 's\/ \$\/\/')\$/p" "$T/helper.sh" \
+    | sed -e "s#/usr/sbin/networksetup#$T/f7/networksetup#" -e "s#\"\$RULES\"#\"$T/f7/rules\"#" > "$T/f7/merge.sh"
+F7=$(bash -c "$(cat "$T/f7/merge.sh"); echo \"\$IFACES\"")
+chk "F7: interface list = union of live and file lists, unsafe names dropped (got: $F7)" '[[ "$F7" == "en0 en5 en9" ]]'
 (
     stat() { echo "${FAKE_STAT:-}"; }   # stands in for both the owner and the mode query
     tee() { cat >/dev/null; }
