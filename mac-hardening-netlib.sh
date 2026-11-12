@@ -4,7 +4,7 @@ set -euo pipefail
 # Foxhole-macos — macOS Network Hardening Library
 #
 # File:    mac-hardening-netlib.sh
-# Version: 0.17.4 (2026-11-10)
+# Version: 0.17.5 (2026-11-12)
 # Author:  Gr3y-foX
 # Based on: drduh/macOS-Security-and-Privacy-Guide (MIT)
 # License: GNU GPL v3 — see LICENSE for details
@@ -354,30 +354,30 @@ EOF
 pass quick inet6 proto icmp6 all
 
 EOF
-        local IP
+        # [4] No pass rule for Quad9 in any mode (audit F9): a quick pass here is
+        # evaluated before a VPN kill switch that loads its anchor after
+        # com.apple/* (Mullvad does), so it would let Quad9 traffic out with the
+        # tunnel down. Exceptions are expressed by NOT blocking instead: traffic
+        # the blocks don't match falls through to the rest of the ruleset.
+        local DNS_DST="any"
         case "$DNS_MODE" in
             doh)
-                printf '# [4] Quad9 whitelist: DoH only (tcp 443); plain DNS to Quad9 stays blocked\n'
-                for IP in "$QUAD9_PRIMARY" "$QUAD9_SECONDARY" \
-                          "$QUAD9_ECS_PRIMARY" "$QUAD9_ECS_SECONDARY"; do
-                    printf 'pass out quick proto tcp to %s port 443\n' "$IP"
-                done
+                printf '# [4] doh: Quad9 DoH (tcp 443) is never blocked here; no pass rule needed\n'
                 ;;
             plain)
-                printf '# [4] Quad9 whitelist: any port (plain DNS allowed to Quad9)\n'
-                for IP in "$QUAD9_PRIMARY" "$QUAD9_SECONDARY" \
-                          "$QUAD9_ECS_PRIMARY" "$QUAD9_ECS_SECONDARY"; do
-                    printf 'pass out quick proto { udp tcp } to %s\n' "$IP"
-                done
+                printf '# [4] plain: plain DNS/DoT to Quad9 is left out of the blocks (no pass rule)\n'
+                printf 'table <foxhole_quad9> const { %s %s %s %s }\n' "$QUAD9_PRIMARY" "$QUAD9_SECONDARY" \
+                    "$QUAD9_ECS_PRIMARY" "$QUAD9_ECS_SECONDARY"
+                DNS_DST="! <foxhole_quad9>"
                 ;;
             vpn)
-                printf '# [4] No Quad9 exception: DNS leaves only through the VPN tunnel (rule [2])\n'
+                printf '# [4] vpn: no Quad9 exception, DNS leaves only through the VPN tunnel\n'
                 ;;
         esac
         printf '\n# [5] Block plain DNS (53) and DNS-over-TLS (853) on physical interfaces only\n'
         printf '# Tunnels are already passed by rule [2], so these never reach them\n'
-        printf 'block out quick on { %s } proto { udp tcp } to any port 53\n' "$IFACES"
-        printf 'block out quick on { %s } proto { udp tcp } to any port 853\n' "$IFACES"
+        printf 'block out quick on { %s } proto { udp tcp } to %s port 53\n' "$IFACES" "$DNS_DST"
+        printf 'block out quick on { %s } proto { udp tcp } to %s port 853\n' "$IFACES" "$DNS_DST"
         printf 'block out quick on { %s } inet6 proto { udp tcp } to any port 53\n' "$IFACES"
         printf 'block out quick on { %s } inet6 proto { udp tcp } to any port 853\n' "$IFACES"
     } | sudo tee "$PF_ANCHOR" >/dev/null \
@@ -1247,7 +1247,7 @@ main() {
     echo ""
     echo "  ╔══════════════════════════════════════════╗"
     echo "  ║       macOS Network Hardening Netlib     ║"
-    echo "  ║            v0.17.4 ·  by Gr3y-foX       ║"
+    echo "  ║            v0.17.5 ·  by Gr3y-foX       ║"
     echo "  ║       ARM/M-chip  |  strict mode         ║"
     echo "  ╠══════════════════════════════════════════╣"
     echo "  ║  module: netlib   |  mode: interactive   ║"

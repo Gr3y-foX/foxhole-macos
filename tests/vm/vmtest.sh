@@ -102,8 +102,7 @@ B=$(blk53); echo "  info: udp/53 block-rule packets after dig @8.8.8.8: $B"
 chk "DNS to 8.8.8.8 hits the block rule" '[[ "$B" -gt 0 ]]'
 netchk "plain DNS @8.8.8.8 blocked" '! dig +time=3 +tries=1 +short example.com @8.8.8.8 2>/dev/null | grep -q "[0-9]"'
 netchk "plain DNS to Quad9 @9.9.9.9:53 blocked in the default doh mode" '! dig +time=3 +tries=1 +short example.com @9.9.9.9 2>/dev/null | grep -q "[0-9]"'
-echo "  info: Quad9 rules as PF prints them:"; pfq -a $A -sr | grep "to 9\.9\.9\.9\|to 149"
-chk "doh mode: Quad9 passes tcp 443 only" 'pfq -a $A -sr | grep "to 9\.9\.9\.9" | grep -q "proto tcp.*port = 443" && ! pfq -a $A -sr | grep "to 9\.9\.9\.9" | grep -qv "port = 443"'
+chk "doh mode: no Quad9 rule or table (audit F9: no pass ahead of a kill switch)" '! pfq -a $A -sr | grep -q "9\.9\.9\.\|149\.112\|foxhole_quad9"'
 netchk "HTTPS by IP still works during lock" 'curl -s --max-time 6 -o /dev/null -w "%{http_code}" https://9.9.9.9/ -k | grep -qE "^[0-9]{3}$"'
 
 echo "== T4 idempotence + coexistence"
@@ -322,9 +321,12 @@ chk "vpn mode: block rules and utun passes loaded" 'pfq -a $A -sr | grep -q "por
 netchk "vpn mode: even Quad9 on 53 is blocked" '! dig +time=3 +tries=1 +short example.com @9.9.9.9 2>/dev/null | grep -q "[0-9]"'
 disable_pf_dns_lock >/dev/null 2>&1
 FOXHOLE_DNS_MODE=plain prepare_pf_dns_lock_anchor >/dev/null 2>&1; enable_pf_dns_lock >/dev/null 2>&1
-chk "plain mode: Quad9 passes udp+tcp on any port" 'pfq -a $A -sr | grep "to 9\.9\.9\.9" | grep -qv "port = 443"'
+echo "  info: plain-mode blocks as PF prints them:"; pfq -a $A -sr | grep "^block" | sed "s/^/    /"
+chk "plain mode: Quad9 left out of the 53/853 blocks via the table, no pass rule (F9)" 'pfq -a $A -sr | grep -q "to ! <foxhole_quad9> port = 53" && pfq -a $A -sr | grep -q "to ! <foxhole_quad9> port = 853" && ! pfq -a $A -sr | grep "^pass" | grep -q "9\.9\.9\.\|foxhole_quad9"'
+chk "plain mode: table holds the 4 Quad9 addresses" '[[ "$(pfq -a $A -t foxhole_quad9 -T show | grep -cE "^ *(9\.9\.9\.(9|11)|149\.112\.112\.(112|11))$")" == 4 ]]'
 netchk "plain mode: Quad9 on 53 allowed" 'dig +time=4 +tries=1 +short example.com @9.9.9.9 2>/dev/null | grep -q "[0-9]"'
 disable_pf_dns_lock >/dev/null 2>&1
+chk "plain mode disable: rules and the Quad9 table flushed" '! pfq -a $A -sr | grep -q . && ! pfq -a $A -s Tables | grep -q foxhole_quad9'
 FOXHOLE_DNS_MODE=doh prepare_pf_dns_lock_anchor >/dev/null 2>&1; enable_pf_dns_lock >/dev/null 2>&1
 REAL_IF=$(networksetup -listallhardwareports | awk '/^Device: en[0-9]+$/ {print $2; exit}')
 sudo sed -i '' -E 's/^(block out quick on \{)[^}]*(\} )/\1 en99 \2/' $RULES
@@ -476,9 +478,10 @@ FOXHOLE_DNS_MODE=vpn prepare_pf_dns_lock_anchor >/dev/null 2>&1
 ( ask() { printf -v "$2" '%s' 'N'; }; enable_pf_dns_lock ) >/dev/null 2>&1
 chk "declined switch: rules file still says plain, prepared file dropped" 'grep -q "^# DNS policy: plain" $RULES && ! test -e $RULES.new'
 sudo launchctl kickstart -k system/com.hardening.pf.dnsleak >/dev/null 2>&1; sleep 3
-chk "declined switch: a daemon re-run (as at boot) still loads plain" 'pfq -a $A -sr | grep "to 9\.9\.9\.9" | grep -qv "port = 443" && sudo bash $HELPER status'
+chk "declined switch: a daemon re-run (as at boot) still loads plain" 'pfq -a $A -sr | grep -q "foxhole_quad9" && sudo bash $HELPER status'
 FOXHOLE_DNS_MODE=vpn prepare_pf_dns_lock_anchor >/dev/null 2>&1; enable_pf_dns_lock >/dev/null 2>&1
-chk "direct switch plain -> vpn (no disable): no Quad9 rule left in the kernel" '! pfq -a $A -sr | grep -q "9\.9\.9\."'
+chk "direct switch plain -> vpn (no disable): no Quad9 rule left in the kernel" '! pfq -a $A -sr | grep -q "9\.9\.9\.\|foxhole_quad9"'
+echo "  info: tables left in the anchor after the switch: $(pfq -a $A -s Tables | tr '\n' ' ')"
 chk "direct switch: lock active, still exactly one reference, daemon bootstrapped" 'sudo bash $HELPER status && [[ "$(ntokens)" == 1 ]] && sudo launchctl print system/com.hardening.pf.dnsleak >/dev/null 2>&1'
 
 echo "== T24 helper status and boot action (audit F8)"
@@ -494,6 +497,72 @@ echo "== T25 reset continues past a failed step (audit F16)"
 chk "reset reports the failed step and still completes" 'grep -q "PF DNS lock step failed" /tmp/t25.out && grep -q "Network hardening reset complete" /tmp/t25.out'
 reset_net_hardening >/dev/null 2>&1
 chk "T25 cleanup: PF off, no leftovers" '! pf_on && ! test -e $RULES && ! test -e $HELPER && ! test -e $PLIST'
+
+echo "== T28 real Mullvad: lock next to the Mullvad firewall (audit F9, F10; base image foxhole-mullvad)"
+# Mullvad loads its rules as anchor "mullvad" AFTER anchor "com.apple/*" in the main
+# ruleset, so the lock's quick pass rules are evaluated before its kill switch (F9).
+# It enables PF with pfctl -e (no reference) and runs pfctl -d when it disconnects.
+MV="/Applications/Mullvad VPN.app/Contents/Resources/mullvad"
+mv_anchor() { pfq -sr | grep -q '^anchor "mullvad"'; }
+egress()    { curl -sk -o /dev/null --max-time 6 "$1"; }   # 0 = any HTTP answer came back
+# Mullvad output is captured, never piped into grep -q (SIGPIPE + pipefail = false negative)
+mv_out()    { local o; o=$("$MV" "$@" 2>/dev/null); printf "%s" "$o"; }
+# The daemon needs about a minute after boot before the CLI answers
+if [[ -x "$MV" ]]; then
+    for _ in $(seq 1 30); do "$MV" status >/dev/null 2>&1 && break; sleep 2; done
+fi
+if [[ "$NET_OK" != 1 ]]; then
+    skip "T28 real Mullvad"
+elif [[ ! -x "$MV" ]]; then
+    echo "  SKIP: T28 real Mullvad (Mullvad app not installed; use FOXHOLE_VM_BASE=foxhole-mullvad)"; SKIP=$((SKIP+1))
+elif [[ "$("$MV" account get 2>/dev/null)" != *"Expires at"* ]]; then   # no grep -q pipe: SIGPIPE + pipefail
+    # Only the first stderr line: the account number itself is never printed
+    echo "  SKIP: T28 real Mullvad (not logged in or daemon not answering: $("$MV" account get 2>&1 >/dev/null | sed -n 1p))"; SKIP=$((SKIP+1))
+elif [[ "$(mv_out lan get)" != *allow* ]]; then
+    echo "  SKIP: T28 real Mullvad (local network sharing must be 'allow', or connecting cuts this SSH session)"; SKIP=$((SKIP+1))
+else
+    "$MV" lockdown-mode set off >/dev/null 2>&1
+    "$MV" connect --wait >/dev/null 2>&1
+    chk "Mullvad connected" '[[ "$(mv_out status)" == Connected* ]]'
+    echo "  info: main ruleset with Mullvad: $(pfq -sr | grep '^anchor' | tr '\n' ' ')"
+    chk "Mullvad's anchor is evaluated after com.apple/* (the lock's rules come first)" '[[ "$(pfq -sr | grep "^anchor" | head -1)" == "anchor \"com.apple/*\" all" ]] && mv_anchor'
+
+    FOXHOLE_DNS_MODE=doh prepare_pf_dns_lock_anchor >/dev/null 2>&1; enable_pf_dns_lock >/dev/null 2>&1
+    chk "connected: lock active, Mullvad's anchor kept" 'sudo bash $HELPER status && mv_anchor'
+    chk "connected: system DNS resolves through the tunnel with the lock on" 'dig +time=3 +tries=1 +short example.com | grep -q "[0-9]"'
+    chk "connected: HTTPS by IP works with the lock on" 'egress https://1.1.1.1/'
+    "$MV" disconnect --wait >/dev/null 2>&1; sleep 3
+    echo "  info: after Mullvad disconnect: $(pfq -s info | head -1 | cut -c1-16), references: $(ntokens)"
+    chk "lock still active after Mullvad disconnects (Mullvad runs pfctl -d)" 'sudo bash $HELPER status && pf_on'
+    disable_pf_dns_lock >/dev/null 2>&1
+
+    echo "  T28 F9: kill switch on (lockdown mode, tunnel down)"
+    "$MV" lockdown-mode set on >/dev/null 2>&1; sleep 3
+    chk "kill switch alone blocks egress (baseline)" 'mv_anchor && ! egress https://9.9.9.9/ && ! egress https://1.1.1.1/'
+    for MODE in doh plain vpn; do
+        FOXHOLE_DNS_MODE=$MODE prepare_pf_dns_lock_anchor >/dev/null 2>&1; enable_pf_dns_lock >/dev/null 2>&1
+        chk "kill switch + lock $MODE: lock active, Mullvad's anchor kept" 'sudo bash $HELPER status && mv_anchor'
+        chk "kill switch + lock $MODE: HTTPS to Quad9 stays blocked (F9)" '! egress https://9.9.9.9/'
+        chk "kill switch + lock $MODE: DNS to Quad9 :53 stays blocked (F9)" '! dig +time=2 +tries=1 +short example.com @9.9.9.9 2>/dev/null | grep -q "[0-9]"'
+        chk "kill switch + lock $MODE: other HTTPS stays blocked" '! egress https://1.1.1.1/'
+    done
+    disable_pf_dns_lock >/dev/null 2>&1
+    chk "kill switch: disable leaves PF on and Mullvad's rules in place" 'pf_on && mv_anchor && ! egress https://1.1.1.1/'
+
+    echo "  T28 F10: pre-0.17.3 pf.conf marker while the kill switch is on"
+    prepare_pf_dns_lock_anchor >/dev/null 2>&1
+    # Marker only, no reload here: a reload would itself drop Mullvad's anchor
+    printf '\n# ===== hardening dns lock =====\nanchor "com.hardening.dnsleak"\nload anchor "com.hardening.dnsleak" from "/etc/pf.anchors/com.hardening.dnsleak"\n' | sudo tee -a /etc/pf.conf >/dev/null
+    ( ask() { case "$1" in *"Reload the main PF"*) printf -v "$2" '%s' N ;; *) printf -v "$2" '%s' y ;; esac; }
+      enable_pf_dns_lock ) > /tmp/t28-f10.out 2>&1
+    chk "F10: enable warns before reloading the main ruleset" 'grep -q "including a VPN kill switch" /tmp/t28-f10.out && grep -q "Reload skipped" /tmp/t28-f10.out'
+    chk "F10: declined reload keeps Mullvad's kill switch" 'mv_anchor && ! egress https://1.1.1.1/'
+    chk "F10: pf.conf back to baseline, lock active" 'same_conf && sudo bash $HELPER status'
+    disable_pf_dns_lock >/dev/null 2>&1
+
+    "$MV" lockdown-mode set off >/dev/null 2>&1; "$MV" disconnect --wait >/dev/null 2>&1; sleep 3
+    chk "T28 cleanup: Mullvad disconnected, lockdown off, PF off, no leftovers" '[[ "$(mv_out status)" == Disconnected* ]] && [[ "$(mv_out lockdown-mode get)" == *": off"* ]] && ! pf_on && ! test -e $RULES && ! test -e $HELPER && ! test -e $PLIST'
+fi
 
 echo "== T10 vpn_daily.sh menu from another cwd (driven by expect: ask() needs a tty)"
 cat > /tmp/vd.exp <<'EXP'

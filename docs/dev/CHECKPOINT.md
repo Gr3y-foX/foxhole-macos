@@ -1,4 +1,17 @@
-# Checkpoint — 2026-11-11 (resume here)
+# Checkpoint — 2026-11-12: Mullvad VM ready (resume here)
+
+- New Tart image **`foxhole-mullvad`** (clone of `foxhole-test`): Mullvad app 2026.5, logged in by the user inside the VM (account number never seen or stored), LAN sharing `allow`, auto-connect off, lockdown off, no Homebrew. CLI: `/Applications/Mullvad VPN.app/Contents/Resources/mullvad` (not on PATH).
+- Run the suite from it: `FOXHOLE_VM_BASE=foxhole-mullvad FOXHOLE_VM_NET=bridged bash tests/vm/run.sh --reset`. The existing sections run with Mullvad disconnected (auto-connect off), so this is first a baseline that the installed client changes nothing.
+- Networking: bridging needs Wi-Fi `en0` (tart refuses iPhone USB `en9`); with USB tethering + host Mullvad, NAT has no internet. Mullvad in the VM with LAN sharing off cuts SSH at connect and again at boot; recovery is `tart run` with a window.
+- **T28 real Mullvad** added to `tests/vm/vmtest.sh` (before T10; skipped without a logged-in Mullvad). Run: 186 / 5 / 0 + 12 / 0 / 0, report `../testing/reports/vm-test-report-2026-11-12.md`. Uncommitted, on worktree branch `claude/project-agents-list-260301` (not `debug`).
+- **F9 confirmed and fixed in v0.17.5** (`../changelog/v0.17.5.md`): no Quad9 pass rules; `plain` uses `table <foxhole_quad9>` in the blocks (`to ! <foxhole_quad9>`). VM 192 / 1 / 0 + 12 / 0 / 0 (`vm-test-2026-11-12_120927.log`), offline 50 / 50. Still open from F9: the unscoped lo0/utun/icmp6 quick passes (CLAUDE.md lists the utun passes as a design rule; `verify_dns_stack` [2] checks them): needs a decision. CLAUDE.md still says netlib v0.17.4 (user's file, not edited).
+- **New N1**: Mullvad's disconnect runs `pfctl -d`, which turns PF off and clears our reference: lock inert until reboot. Needs a design decision (re-enable on PF change? warn in `verify_dns_stack`? document).
+- F10 decline path works. Open product question: `FOXHOLE_ASSUME_YES=1` answers the reload prompt yes and drops the kill switch.
+- T17 "plain mode: Quad9 on 53 allowed" failed once (passed in the run before); likely a hotspot timeout, unproven.
+
+---
+
+# Checkpoint — 2026-11-11
 
 Read first: this file, then `SESSION_PLAN.md` (checkpoint list CP0–CP10), then `NEXT_SESSION.md` for background.
 

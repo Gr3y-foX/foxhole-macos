@@ -30,10 +30,14 @@ chk "passes utun0..utun15 explicitly (PF has no utun+ wildcard)" \
     '[[ "$(grep -c "^pass .* on { utun0 .*utun15 }" "$T/anchor.rules")" == 2 ]] && ! grep -q "utun+" "$T/anchor.rules"'
 chk "blocks 53 and 853 on physical interfaces only" \
     '[[ "$(grep -c "^block out quick on {" "$T/anchor.rules")" == 4 ]] && ! grep -E "^block" "$T/anchor.rules" | grep -vq " on {"'
-chk "default mode doh: Quad9 passes tcp 443 only, before the blocks" \
-    '[[ "$(grep -c "^pass out quick proto tcp to .* port 443$" "$T/anchor.rules")" == 4 ]] && ! grep -q "proto { udp tcp } to 9" "$T/anchor.rules" && [[ "$(grep -n "9\.9\.9\.9" "$T/anchor.rules" | head -1 | cut -d: -f1)" -lt "$(grep -n "^block" "$T/anchor.rules" | head -1 | cut -d: -f1)" ]]'
+chk "default mode doh: no Quad9 rule (443 is never blocked; no pass ahead of a kill switch, F9)" \
+    '! grep -v "^#" "$T/anchor.rules" | grep -q "9\.9\.9\.\|149\.112\|foxhole_quad9" && [[ "$(grep -c "^block out quick on { .* } proto { udp tcp } to any port \(53\|853\)$" "$T/anchor.rules")" == 2 ]]'
 FOXHOLE_DNS_MODE=plain prepare_pf_dns_lock_anchor >/dev/null 2>&1
-chk "mode plain: Quad9 on any port" '[[ "$(grep -c "^pass out quick proto { udp tcp } to " "$T/anchor.rules")" == 4 ]]'
+chk "mode plain: Quad9 left out of the 53/853 blocks via a table, no pass rule (F9)" \
+    'grep -q "^table <foxhole_quad9> const { 9\.9\.9\.9 149\.112\.112\.112 9\.9\.9\.11 149\.112\.112\.11 }$" "$T/anchor.rules" && [[ "$(grep -c "^block out quick on { .* } proto { udp tcp } to ! <foxhole_quad9> port \(53\|853\)$" "$T/anchor.rules")" == 2 ]] && ! grep "^pass" "$T/anchor.rules" | grep -q "9\.9\.9\.\|foxhole_quad9"'
+chk "no mode has a pass rule that names an address (F9)" \
+    '( for m in doh plain vpn; do FOXHOLE_DNS_MODE=$m prepare_pf_dns_lock_anchor >/dev/null 2>&1; grep "^pass" "$T/anchor.rules" | grep -q " to [0-9<]" && exit 1; done; true )'
+FOXHOLE_DNS_MODE=plain prepare_pf_dns_lock_anchor >/dev/null 2>&1
 FOXHOLE_DNS_MODE=vpn prepare_pf_dns_lock_anchor >/dev/null 2>&1
 chk "mode vpn: no Quad9 exception, blocks remain" '! grep -q "9\.9\.9\." "$T/anchor.rules" && [[ "$(grep -c "^block out quick on {" "$T/anchor.rules")" == 4 ]]'
 chk "unknown mode is rejected" '! (FOXHOLE_DNS_MODE=bogus _choose_dns_mode >/dev/null 2>&1)'
