@@ -1,4 +1,41 @@
-# Checkpoint — 2026-11-12: Mullvad VM ready (resume here)
+# Checkpoint — 2026-11-13: weekend handoff (resume here)
+
+This is the only current resume point. `SESSION_PLAN.md` and `NEXT_SESSION.md` are historical (2026-11-04).
+
+## State (checked 2026-11-13)
+- `main` = `origin/main` = `5b20e03` (v0.17.4, **PR #1 merged**). No PR is open.
+- `debug` = `origin/debug`: netlib **v0.17.5** (`576d407`, F9 fix) plus this handoff. `debug` is ahead of `main`; `main` has nothing `debug` lacks.
+- `private-all` = `6ab45bb`, **behind** `debug` (the F9 fix went straight to `debug` on the user's request). Ask before syncing it.
+- CI `lint` green on `576d407` (shellcheck + macOS offline checks).
+- Tests: VM 192 / 1 / 0 + 12 / 0 / 0 on image `foxhole-mullvad` (`../testing/reports/vm-test-report-2026-11-12.md`, log `../testing/logs/vm-test-2026-11-12_120927.log`); offline 50 / 50. The one failure is N1 (below), kept red on purpose.
+
+## Working without the Mac (weekend)
+- Readable from GitHub / a cloud session: code, `tests/`, all reports and logs under `docs/testing/`, the audit (`AUDIT_PF_LOCKOUT.md`, `AUDIT_PF_LOCKOUT_REPORT.md`), changelogs, this file.
+- Agent team definitions: `agents/` (copies; see `agents/README.md` to install them in `.claude/agents/`).
+- Not possible remotely: anything in the Tart VM (images live on the SSD at home), so no `tests/vm/run.sh`. Offline checks (`bash tests/ci/offline.sh`) need macOS; CI runs them on push.
+- Good remote work: analysis and design for the open items, offline-checkable changes, docs. Mark anything that needs a VM run as "VM run pending" in the commit and here.
+
+## Open (ask the user for the order)
+1. **N1 (new, not in the audit):** Mullvad's disconnect runs `pfctl -d`: PF off, our reference gone, the lock inert until reboot or re-enable. T28 check "lock still active after Mullvad disconnects" fails on purpose. Needs a design decision: re-enable when PF goes off (watcher daemon?), warn in `verify_dns_stack`, or document.
+2. **Rest of F9:** unscoped quick passes `pass quick on lo0`, `pass out/in quick on { utun0 … utun15 }`, `pass quick inet6 proto icmp6 all` still run before a kill switch (ICMPv6, other tunnels). The blocks only match `en*`, so the passes are not needed by the lock, but CLAUDE.md calls the utun passes a design rule and `verify_dns_stack` [2] checks them. User decision.
+3. **F10 unattended:** `FOXHOLE_ASSUME_YES=1` answers the main-ruleset reload prompt with yes, which drops Mullvad's kill switch (measured: Mullvad did not restore it within 30 s). Product decision.
+4. **`tests/vm/run.sh`:** retry the first SSH login after `--reset` (the VM refused `admin` once right after boot).
+5. **T17** "plain mode: Quad9 on 53 allowed" failed once (single `dig`); watch it.
+6. **CLAUDE.md** still says netlib v0.17.4 and lists the old PF design notes; propose the update, the user edits it.
+7. **Uncommitted doc sync of 2026-11-11** in worktree `claude/multi-agent-doc-parsing-f0f8cc` (CHECKPOINT agent-team plan, `CLAUDE.md`, `docs/README.md`, `PR-1-text.md`, `SESSION_PLAN.md`, `NEXT_SESSION.md`): only on the Mac. Its still-valid content (PR #1 merged, agent team) is in this section; review the rest on the Mac before discarding or committing it.
+
+## Agent team (used 2026-11-12/13)
+Opus orchestrates and reviews diffs; `github-ops` (Haiku) did the fast-forward and push on exact orders (`git fetch . <full-sha>:debug`: short SHAs fail); `docs-scout` (Haiku) and `coder` (Sonnet) are defined but not yet tried on a task.
+
+## Mullvad VM notes (for the next VM session)
+- Mac on the iPhone hotspot over **Wi-Fi** (bridging needs `en0`; iPhone USB `en9` cannot be bridged).
+- `--reset` clones with a new MAC, so the VM gets a new hotspot IP each run; Mullvad's daemon answers ~1 min after boot (T28 waits).
+- Always `mullvad lan set allow` before `connect`, or SSH from the host dies; recovery is `tart run` with a window.
+- In `vmtest.sh` never pipe Mullvad CLI output into `grep -q` (SIGPIPE + `pipefail`); the VM login shell is zsh (send probes as `bash -s`).
+
+---
+
+# Checkpoint — 2026-11-12: Mullvad VM ready
 
 - New Tart image **`foxhole-mullvad`** (clone of `foxhole-test`): Mullvad app 2026.5, logged in by the user inside the VM (account number never seen or stored), LAN sharing `allow`, auto-connect off, lockdown off, no Homebrew. CLI: `/Applications/Mullvad VPN.app/Contents/Resources/mullvad` (not on PATH).
 - Run the suite from it: `FOXHOLE_VM_BASE=foxhole-mullvad FOXHOLE_VM_NET=bridged bash tests/vm/run.sh --reset`. The existing sections run with Mullvad disconnected (auto-connect off), so this is first a baseline that the installed client changes nothing.
