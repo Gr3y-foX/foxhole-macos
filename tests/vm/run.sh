@@ -27,7 +27,7 @@ LOG_DIR="${REPO}/docs/testing/logs"
 LOG="${LOG_DIR}/vm-test-$(date +%Y-%m-%d_%H%M%S).log"
 mkdir -p "$LOG_DIR"
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-          -o PubkeyAuthentication=no -o LogLevel=ERROR -o ServerAliveInterval=10)
+          -o PubkeyAuthentication=no -o LogLevel=ERROR -o ServerAliveInterval=10 -o ConnectTimeout=10)
 
 [[ -d "$TART_HOME" ]] || { echo "TART_HOME not found: $TART_HOME (SSD unplugged?)"; exit 1; }
 command -v sshpass >/dev/null || { echo "sshpass missing"; exit 1; }
@@ -66,6 +66,19 @@ for _ in $(seq 1 30); do
 done
 
 ssh_vm() { sshpass -p admin ssh "${SSH_OPTS[@]}" "admin@${IP}" "$@"; }
+
+# Right after a reset sshd answers before the login service accepts the password
+# ("Permission denied" for a short while): wait for a login that works.
+LOGIN_TRIES=30
+LOGIN_OK=0
+for _ in $(seq 1 "$LOGIN_TRIES"); do
+    if ssh_vm true >/dev/null 2>&1; then LOGIN_OK=1; break; fi
+    sleep 3
+done
+if [[ "$LOGIN_OK" != 1 ]]; then
+    echo "FAIL: VM accepted no SSH login after ${LOGIN_TRIES} tries (3 s apart)" | tee "$LOG"
+    exit 1
+fi
 
 ssh_vm 'rm -rf ~/foxhole && mkdir -p ~/foxhole'
 # Tracked files plus not-yet-committed files under tests/

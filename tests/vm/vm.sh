@@ -37,7 +37,17 @@ case "${1:-}" in
         fi
         IP=$(vm_ip 120)
         for _ in $(seq 1 40); do nc -z -G2 "$IP" 22 2>/dev/null && break; sleep 3; done
-        echo "VM ${VM} at ${IP}"
+        # sshd can answer before the login service accepts the password: wait for a working login
+        LOGIN_OK=0
+        for _ in $(seq 1 30); do
+            if ssh_vm true >/dev/null 2>&1; then LOGIN_OK=1; break; fi
+            sleep 3
+        done
+        if [[ "$LOGIN_OK" == 1 ]]; then
+            echo "VM ${VM} at ${IP}"
+        else
+            echo "VM ${VM} at ${IP} (SSH login not ready yet)"
+        fi
         ;;
     push)
         ssh_vm 'rm -rf ~/foxhole && mkdir -p ~/foxhole'

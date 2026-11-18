@@ -101,14 +101,14 @@ Key building blocks include:
 - **PF DNS leak lock**
   - `prepare_pf_dns_lock_anchor`
     Writes the anchor `/etc/pf.anchors/com.hardening.dnsleak`:
-    - Passes loopback, all VPN tunnels (`utun0`–`utun15`, listed explicitly: PF on macOS has no `utun+` wildcard) and ICMPv6 (RFC 4890).
+    - Has **no pass rules** (v0.17.6): a quick pass in a `com.apple/*` child is evaluated before a VPN kill switch that loads after it (audit F9). The blocks are scoped to physical interfaces, so VPN tunnels, loopback and ICMPv6 are never matched.
     - Applies the DNS policy (`FOXHOLE_DNS_MODE`, or a prompt in the menu; unattended runs and `FOXHOLE_ASSUME_YES=1` use `doh`):
       - `doh` (default): Quad9 is reachable on **tcp 443 only** (the DoH profile); plain DNS to 9.9.9.9 is blocked.
       - `vpn`: no Quad9 exception; DNS leaves only through the VPN tunnel. Set your resolver inside the VPN (for example Mullvad with Quad9).
       - `plain`: Quad9 on any port (plain DNS to 9.9.9.9), for setups without a DoH profile.
     - Blocks plain DNS and DNS‑over‑TLS (ports 53/853, IPv4 and IPv6) on **physical interfaces only** (`en*`, detected with `networksetup`).
   - `enable_pf_dns_lock` (v0.17.3+)
-    Loads the rules into `com.apple/foxhole.dnsleak`, a child of the `com.apple/*` anchor that the stock `/etc/pf.conf` already evaluates. `/etc/pf.conf` is **not edited** and the main ruleset is **not reloaded**, so other PF users (e.g. a VPN kill switch) keep their rules. PF is enabled with a reference token (`pfctl -E`). A helper (`/usr/local/libexec/foxhole-pf-dnslock start|boot|stop|status`) does the work. A LaunchDaemon runs it again at every boot (`boot`: `start` with a few retries). If the lock cannot be started or the daemon cannot be installed, enable rolls everything back and the lock stays off. At each start it merges the live physical interfaces with the list in the rules file, so a network card added later is covered and one missing at boot stays covered (falls back to the rules as written). Enable refuses to run if the main ruleset does not evaluate `com.apple/*`.
+    Loads the rules into `com.apple/foxhole.dnsleak`, a child of the `com.apple/*` anchor that the stock `/etc/pf.conf` already evaluates. `/etc/pf.conf` is **not edited** and the main ruleset is **not reloaded**, so other PF users (e.g. a VPN kill switch) keep their rules. PF is enabled with a reference token (`pfctl -E`). A helper (`/usr/local/libexec/foxhole-pf-dnslock start|boot|stop|status`) does the work. A LaunchDaemon runs it at every boot and then every 60 s (`boot`: `start` with a few retries; while the lock is up it does nothing and logs nothing). The periodic run restores the lock after another program turns PF off (Mullvad runs `pfctl -d` when it disconnects and that drops our reference). If the lock cannot be started or the daemon cannot be installed, enable rolls everything back and the lock stays off. At each start it merges the live physical interfaces with the list in the rules file, so a network card added later is covered and one missing at boot stays covered (falls back to the rules as written). Enable refuses to run if the main ruleset does not evaluate `com.apple/*`.
   - `disable_pf_dns_lock`
     Flushes the rules and releases the token (`pfctl -X`), so PF goes back to off unless another program still holds a reference. Removes the helper, the rules file and the LaunchDaemon. Installs from v0.17.2 or older, which edited `/etc/pf.conf`, are cleaned up automatically on enable or disable.
   - Inspect: `sudo pfctl -a com.apple/foxhole.dnsleak -sr` (rules), `sudo pfctl -s References` (who keeps PF on), `/var/log/foxhole-pf.log`.
@@ -225,7 +225,7 @@ bash profile-paranoid-tor.sh
 ```
 
 ### Unattended runs and tests
-- `FOXHOLE_ASSUME_YES=1` answers every prompt "y" (the DNS mode defaults to `doh`; set `FOXHOLE_DNS_MODE=doh|vpn|plain` to choose).
+- `FOXHOLE_ASSUME_YES=1` answers every prompt "y" (the DNS mode defaults to `doh`; set `FOXHOLE_DNS_MODE=doh|vpn|plain` to choose). One exception: when migrating a pre-0.17.3 install it does not reload the main PF ruleset if that holds other anchors (a VPN kill switch); it names them and skips the reload.
 - `bash tests/ci/offline.sh` checks the scripts without touching the system.
 - `FOXHOLE_VM_NET=bridged bash tests/vm/run.sh --reset` runs the full suite in a Tart VM (never on your Mac). Logs go to `docs/testing/logs/`; see `docs/testing/README.md`. `FOXHOLE_VM_BASE=foxhole-brew` starts from an image with Homebrew, which also runs the real-Privoxy (T18) and real-WireGuard (T19) tests.
 

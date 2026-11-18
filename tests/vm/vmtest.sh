@@ -44,7 +44,7 @@ if [[ "${1:-}" == "--after-reboot" ]]; then
     chk "after reboot: helper status = active" 'sudo bash $HELPER status'
     chk "after reboot: PF enabled, exactly one reference" 'pf_on && [[ "$(ntokens)" == 1 ]]'
     chk "after reboot: main ruleset evaluates com.apple/*" 'pfq -sr | grep -qE "^anchor \"com\.apple/\*\""'
-    chk "after reboot: rules loaded (port 53 blocks, utun passes)" 'pfq -a $A -sr | grep -q "port = 53" && pfq -a $A -sr | grep -q "^pass .* on utun"'
+    chk "after reboot: rules loaded (port 53 blocks, no pass rules)" 'pfq -a $A -sr | grep -q "port = 53" && ! pfq -a $A -sr | grep -q "^pass"'
     chk "after reboot: the boot action logged a successful run" 'sudo grep -q "boot: rules loaded" /var/log/foxhole-pf.log'
     chk "after reboot: no temp or pending files" '! ls /var/run/foxhole-pf.* >/dev/null 2>&1 && ! test -e $RULES.new && ! test -e $PLIST.new && ! test -e $HELPER.new'
     pfq -a $A -z >/dev/null
@@ -82,11 +82,11 @@ chk "rules syntax ok (pfctl -nf)" 'sudo pfctl -nf $RULES.new 2>/dev/null'
 chk "block rules scoped (on {)" 'grep -q "^block out quick on {" $RULES.new'
 enable_pf_dns_lock 2>&1 | sed 's/\x1b\[[0-9;]*m//g'
 chk "enable promoted the prepared rules (rules file root:wheel 644, no .new left)" 'test -f $RULES && ! test -e $RULES.new && [[ "$(stat -f "%Su:%Sg %Lp" $RULES)" == "root:wheel 644" ]]'
-chk "plist root:wheel 644, runs the boot action, no staging files left" '[[ "$(stat -f "%Su:%Sg %Lp" $PLIST)" == "root:wheel 644" ]] && grep -q "<string>boot</string>" $PLIST && ! test -e $PLIST.new && ! test -e $HELPER.new && ! ls /tmp/foxhole-pf-* /tmp/pf.anchor.* >/dev/null 2>&1'
+chk "plist root:wheel 644, runs the boot action every 60 s, no staging files left" '[[ "$(stat -f "%Su:%Sg %Lp" $PLIST)" == "root:wheel 644" ]] && grep -q "<string>boot</string>" $PLIST && grep -A1 "<key>StartInterval</key>" $PLIST | grep -q "<integer>60</integer>" && ! test -e $PLIST.new && ! test -e $HELPER.new && ! ls /tmp/foxhole-pf-* /tmp/pf.anchor.* >/dev/null 2>&1'
 chk "pf.conf untouched" 'same_conf && cmp -s /etc/pf.conf /tmp/pf.conf.baseline'
 chk "main ruleset untouched" 'diff <(pfq -sr) /tmp/pf.main.baseline >/dev/null'
 chk "rules loaded in $A (port 53)" 'pfq -a $A -sr | grep -q "port = 53"'
-chk "utun pass rules loaded (utun0..utun15)" '[[ "$(pfq -a $A -sr | grep -c "^pass .* on utun")" -ge 30 ]]'
+chk "anchor has no pass rules (F9, D6), only the block rules" '! pfq -a $A -sr | grep -q "^pass" && [[ "$(pfq -a $A -sr | grep -c "^block")" -ge 4 ]]'
 chk "PF enabled" 'pf_on'
 chk "exactly one PF reference held" '[[ "$(ntokens)" == 1 ]]'
 chk "token file root 600, token is held" '[[ "$(sudo stat -f "%Su %Lp" $TOKEN)" == "root 600" ]] && pfq -s References | grep -qw "$(sudo cat $TOKEN)"'
@@ -110,8 +110,11 @@ enable_pf_dns_lock >/dev/null 2>&1
 chk "second enable: still one reference" '[[ "$(ntokens)" == 1 ]]'
 sudo pfctl -f /etc/pf.conf >/dev/null 2>&1
 chk "rules survive a main-ruleset reload (pfctl -f /etc/pf.conf)" 'sudo bash $HELPER status'
+# With the lock up the boot action is a silent no-op (D5), so flush the anchor first: the re-run must reload it
+pfq -a $A -F all >/dev/null
+chk "anchor flushed (setup for the daemon re-run)" '! pfq -a $A -sr | grep -q .'
 sudo launchctl kickstart -k system/com.hardening.pf.dnsleak >/dev/null 2>&1; sleep 2
-chk "daemon re-run: still one reference" '[[ "$(ntokens)" == 1 ]] && sudo bash $HELPER status'
+chk "daemon re-run: reloads the flushed anchor, still one reference" '[[ "$(ntokens)" == 1 ]] && sudo bash $HELPER status'
 OTHER=$(sudo pfctl -E 2>&1 | sed -n "s/^Token : //p")
 echo "  info: second PF user (like a VPN kill switch) took token $OTHER"
 
@@ -119,7 +122,7 @@ echo "== T5 verify_dns_stack completes"
 OUT=$(verify_dns_stack 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
 echo "$OUT" | grep -E '^\[|Results'
 chk "health check reached summary" 'echo "$OUT" | grep -q "Results:"'
-chk "[2] utun rule found via anchor" 'echo "$OUT" | grep -q "\[2\].*present"'
+chk "[2] block rules found via anchor" 'echo "$OUT" | grep -q "\[2\].*present"'
 
 echo "== T6 disable"
 disable_pf_dns_lock 2>&1 | sed 's/\x1b\[[0-9;]*m//g'
@@ -146,6 +149,27 @@ chk "migration: new lock active" 'sudo bash $HELPER status'
 disable_pf_dns_lock >/dev/null 2>&1
 chk "migration: disable leaves no hardening lines" '! grep -q "dnsleak\|hardening dns lock" /etc/pf.conf'
 sudo pfctl -d >/dev/null 2>&1   # the simulated old install had no token; turn PF off by hand
+
+echo "== T30 unattended legacy migration keeps a foreign anchor (F10, D7; no internet needed)"
+# A stand-in for a VPN kill switch: the stock main ruleset plus an extra anchor, loaded from stdin (no temp file).
+# ask() is stubbed to "yes" in this file, so only the guard in front of it can stop the reload.
+prepare_pf_dns_lock_anchor >/dev/null 2>&1
+{ cat /tmp/pf.conf.baseline; printf 'anchor "fakevpn"\n'; } | sudo pfctl -f - >/dev/null 2>&1
+chk "T30 setup: main ruleset holds anchor fakevpn next to com.apple/*" 'pfq -sr | grep -q "^anchor \"fakevpn\"" && pfq -sr | grep -qE "^anchor \"com\.apple/\*\""'
+# Marker only, no reload here (T7 reloaded; this case must not)
+printf '\n# ===== hardening dns lock =====\nanchor "com.hardening.dnsleak"\nload anchor "com.hardening.dnsleak" from "/etc/pf.anchors/com.hardening.dnsleak"\n' | sudo tee -a /etc/pf.conf >/dev/null
+chk "T30 setup: pf.conf carries the legacy marker" 'grep -q "hardening dns lock" /etc/pf.conf'
+FOXHOLE_ASSUME_YES=1 enable_pf_dns_lock 2>&1 | sed 's/\x1b\[[0-9;]*m//g' > /tmp/t30.out
+grep -E "Unattended|Reload skipped|ACTIVE|✗" /tmp/t30.out | sed "s/^/  info: /"
+chk "unattended: reload skipped because of the other anchor, fakevpn named" 'grep -q "Unattended run" /tmp/t30.out && grep -q "fakevpn" /tmp/t30.out && grep -q "Reload skipped" /tmp/t30.out'
+chk "unattended: no reload warning or prompt path was taken (ask() is stubbed to yes: only the guard can stop the reload)" '! grep -q "including a VPN kill switch" /tmp/t30.out'
+chk "unattended: anchor fakevpn still in the main ruleset" 'pfq -sr | grep -q "^anchor \"fakevpn\""'
+chk "unattended: pf.conf back to baseline, root:wheel 644" 'same_conf && [[ "$(stat -f "%Su:%Sg %Lp" /etc/pf.conf)" == "root:wheel 644" ]]'
+chk "unattended: new lock active" 'sudo bash $HELPER status'
+disable_pf_dns_lock >/dev/null 2>&1
+sudo pfctl -f /etc/pf.conf >/dev/null 2>&1
+if pf_on && [[ "$(ntokens)" == 0 ]]; then sudo pfctl -d >/dev/null 2>&1; fi   # a stray enable without a reference, as in T7
+chk "T30 cleanup: stock main ruleset restored (no fakevpn), PF off, no leftovers" 'diff <(pfq -sr) /tmp/pf.main.baseline >/dev/null && ! pf_on && ! test -e $RULES && ! test -e $PLIST && ! grep -q "dnsleak\|hardening dns lock" /etc/pf.conf'
 
 echo "== T8 guard: main ruleset without com.apple/*"
 prepare_pf_dns_lock_anchor >/dev/null 2>&1
@@ -205,13 +229,29 @@ chk "no VPN detected before the tunnel exists" '! vpn_active_probe'
 sudo ifconfig utun3 inet 10.99.0.1 10.99.0.2 netmask 255.255.255.255 up
 sudo route -n add -host $TUN_IP -interface utun3 >/dev/null 2>&1
 chk "route to $TUN_IP goes via utun3" 'route -n get $TUN_IP | grep -q "interface: utun3"'
-pfq -a $A -z >/dev/null
-dig +time=1 +tries=1 +short example.com @$TUN_IP >/dev/null 2>&1
-UT=$(pfq -a $A -vsr | awk '/^pass out quick on utun3 all/ {getline; for (i=1;i<=NF;i++) if ($i=="Packets:") print $(i+1)}')
-echo "  info: packets on the utun3 pass rule: ${UT:-none}"
-chk "DNS through the tunnel passes the utun3 rule" '[[ "${UT:-0}" -gt 0 ]]'
+# The block counters cannot isolate one dig (the VM's own resolver traffic hits them too), so
+# watch utun3 instead. PF filters outbound packets before they reach the interface's BPF tap:
+# a packet captured there was let through by the lock, a blocked one never shows up.
+# No `timeout` on macOS: perl's alarm survives exec and ends tcpdump after 8 s at the latest.
+cap_utun3() {   # $1 = output file: capture one udp/53 packet to $TUN_IP on utun3 while a dig runs
+    # shellcheck disable=SC2024  # the redirect target is a user-owned /tmp file
+    sudo perl -e 'alarm 8; exec @ARGV' tcpdump -n -l -i utun3 -c 1 "udp port 53 and host $TUN_IP" > "$1" 2>&1 &
+    local TP=$!
+    sleep 1
+    dig +time=1 +tries=2 +short example.com @$TUN_IP >/dev/null 2>&1
+    wait $TP 2>/dev/null
+}
+cap_utun3 /tmp/t12-tun.cap
+echo "  info: capture on utun3 with the route:"; sed 's/^/    /' /tmp/t12-tun.cap | head -4
+chk "DNS through the tunnel passes the lock: the query shows up on utun3 (blocks are scoped to en*, no pass rule needed)" 'grep -q "203\.0\.113\.53\.53" /tmp/t12-tun.cap'
 chk "vpn_active (proxy-toggle) sees the utun IPv4 tunnel" 'vpn_active_probe'
 sudo route -n delete -host $TUN_IP >/dev/null 2>&1
+# Control: without the route the same query leaves a physical interface, where the blocks apply
+pfq -a $A -z >/dev/null
+cap_utun3 /tmp/t12-notun.cap
+echo "  info: udp/53 block-rule packets after the same dig without the tunnel route (noisy, informational): $(blk53)"
+echo "  info: capture on utun3 without the route:"; sed 's/^/    /' /tmp/t12-notun.cap | head -4
+chk "same query without the tunnel route never reaches utun3 (the check above can fail)" '! grep -q "203\.0\.113\.53\.53" /tmp/t12-notun.cap'
 sudo ifconfig utun3 inet 10.99.0.1 delete >/dev/null 2>&1
 chk "no VPN detected after the tunnel is gone" '! vpn_active_probe'
 disable_pf_dns_lock >/dev/null 2>&1
@@ -317,7 +357,7 @@ rm -rf "$HOME/.foxhole"
 echo "== T17 DNS modes (doh/vpn/plain) + interface list re-rendered at helper start"
 FOXHOLE_DNS_MODE=vpn prepare_pf_dns_lock_anchor >/dev/null 2>&1; enable_pf_dns_lock >/dev/null 2>&1
 chk "vpn mode: no Quad9 pass rule loaded" '! pfq -a $A -sr | grep -q "9\.9\.9\."'
-chk "vpn mode: block rules and utun passes loaded" 'pfq -a $A -sr | grep -q "port = 53" && pfq -a $A -sr | grep -q "^pass .* on utun"'
+chk "vpn mode: block rules loaded, no pass rules" 'pfq -a $A -sr | grep -q "port = 53" && ! pfq -a $A -sr | grep -q "^pass"'
 netchk "vpn mode: even Quad9 on 53 is blocked" '! dig +time=3 +tries=1 +short example.com @9.9.9.9 2>/dev/null | grep -q "[0-9]"'
 disable_pf_dns_lock >/dev/null 2>&1
 FOXHOLE_DNS_MODE=plain prepare_pf_dns_lock_anchor >/dev/null 2>&1; enable_pf_dns_lock >/dev/null 2>&1
@@ -477,6 +517,8 @@ FOXHOLE_DNS_MODE=plain prepare_pf_dns_lock_anchor >/dev/null 2>&1; enable_pf_dns
 FOXHOLE_DNS_MODE=vpn prepare_pf_dns_lock_anchor >/dev/null 2>&1
 ( ask() { printf -v "$2" '%s' 'N'; }; enable_pf_dns_lock ) >/dev/null 2>&1
 chk "declined switch: rules file still says plain, prepared file dropped" 'grep -q "^# DNS policy: plain" $RULES && ! test -e $RULES.new'
+# The boot action is a silent no-op while the lock is up (D5): flush the anchor so the re-run really loads the rules file
+pfq -a $A -F all >/dev/null
 sudo launchctl kickstart -k system/com.hardening.pf.dnsleak >/dev/null 2>&1; sleep 3
 chk "declined switch: a daemon re-run (as at boot) still loads plain" 'pfq -a $A -sr | grep -q "foxhole_quad9" && sudo bash $HELPER status'
 FOXHOLE_DNS_MODE=vpn prepare_pf_dns_lock_anchor >/dev/null 2>&1; enable_pf_dns_lock >/dev/null 2>&1
@@ -492,6 +534,41 @@ chk "status is ok again once the stock main ruleset is back" 'sudo bash $HELPER 
 sudo bash $HELPER boot >/dev/null 2>&1; RC=$?
 chk "boot action is idempotent: rc 0, still one reference" '[[ $RC -eq 0 ]] && [[ "$(ntokens)" == 1 ]] && sudo bash $HELPER status'
 
+echo "== T29 lock returns after another program's pfctl -d (N1, D5; no internet needed)"
+# Mullvad runs pfctl -d when it disconnects: that turns PF off and drops our enable reference.
+# The daemon's 60 s re-run (StartInterval) must bring the lock back, and must be silent while it is up.
+FL=/var/log/foxhole-pf.log
+logn() { sudo cat $FL 2>/dev/null | wc -l | tr -d ' '; }
+bootn() { local n; n=$(sudo grep -c "boot: rules loaded" $FL 2>/dev/null || true); echo "${n:-0}"; }
+disable_pf_dns_lock >/dev/null 2>&1   # T23/T24 left the lock on; start from a clean state
+FOXHOLE_DNS_MODE=doh prepare_pf_dns_lock_anchor >/dev/null 2>&1; enable_pf_dns_lock >/dev/null 2>&1
+chk "T29 setup: lock active, one reference" 'sudo bash $HELPER status && [[ "$(ntokens)" == 1 ]]'
+chk "plist has StartInterval 60 and keeps RunAtLoad" 'grep -A1 "<key>StartInterval</key>" $PLIST | grep -q "<integer>60</integer>" && grep -A1 "<key>RunAtLoad</key>" $PLIST | grep -q "<true/>"'
+echo "  info: daemon: $(sudo launchctl print system/com.hardening.pf.dnsleak 2>&1 | grep -E "run interval|runs =" | tr -s " " | tr "\n" ";")"
+B0=$(bootn)
+sudo pfctl -d >/dev/null 2>&1
+echo "  info: right after pfctl -d: PF $(pf_on && echo on || echo off), references: $(ntokens)"
+chk "right after pfctl -d the lock is inert (helper status fails: the premise of N1)" '! sudo bash $HELPER status'
+BACK=-1
+for i in $(seq 1 18); do
+    sleep 5
+    if sudo bash $HELPER status >/dev/null 2>&1; then BACK=$((i * 5)); break; fi
+done
+echo "  info: lock back after about ${BACK} s (-1 = not within 90 s)"
+chk "lock back within 90 s after pfctl -d" '[[ "$BACK" -gt 0 ]]'
+chk "after the restore: PF on, exactly one reference, block rules loaded" 'pf_on && [[ "$(ntokens)" == 1 ]] && pfq -a $A -sr | grep -q "port = 53"'
+chk "the restoring run logged a 'boot: rules loaded' line" '[[ "$(bootn)" -gt "$B0" ]]'
+L1=$(logn)
+echo "  info: waiting 65 s with the lock up: idle re-runs must not write to $FL"
+sleep 65
+chk "idle re-runs are silent (log did not grow in 65 s)" '[[ "$(logn)" == "$L1" ]]'
+chk "idle re-runs changed nothing: still active, one reference" 'sudo bash $HELPER status && [[ "$(ntokens)" == 1 ]]'
+disable_pf_dns_lock >/dev/null 2>&1
+echo "  info: waiting 65 s after disable: nothing may bring the lock back"
+sleep 65
+chk "after disable nothing returns: PF off, no rules, no plist, no token, no reference" '! pf_on && ! pfq -a $A -sr | grep -q . && ! test -e $PLIST && ! sudo test -e $TOKEN && [[ "$(ntokens)" == 0 ]] && ! sudo launchctl print system/com.hardening.pf.dnsleak >/dev/null 2>&1'
+chk "T29 cleanup: PF off, no leftovers" '! pf_on && ! test -e $RULES && ! test -e $HELPER && ! test -e $PLIST'
+
 echo "== T25 reset continues past a failed step (audit F16)"
 ( disable_pf_dns_lock() { die "simulated PF step failure"; }; reset_net_hardening ) > /tmp/t25.out 2>&1
 chk "reset reports the failed step and still completes" 'grep -q "PF DNS lock step failed" /tmp/t25.out && grep -q "Network hardening reset complete" /tmp/t25.out'
@@ -500,8 +577,9 @@ chk "T25 cleanup: PF off, no leftovers" '! pf_on && ! test -e $RULES && ! test -
 
 echo "== T28 real Mullvad: lock next to the Mullvad firewall (audit F9, F10; base image foxhole-mullvad)"
 # Mullvad loads its rules as anchor "mullvad" AFTER anchor "com.apple/*" in the main
-# ruleset, so the lock's quick pass rules are evaluated before its kill switch (F9).
-# It enables PF with pfctl -e (no reference) and runs pfctl -d when it disconnects.
+# ruleset, so the lock's quick rules are evaluated before its kill switch (F9): the
+# anchor has no pass rules for that reason. Mullvad enables PF with pfctl -e (no
+# reference) and runs pfctl -d when it disconnects, which the daemon's 60 s re-run undoes (N1).
 MV="/Applications/Mullvad VPN.app/Contents/Resources/mullvad"
 mv_anchor() { pfq -sr | grep -q '^anchor "mullvad"'; }
 egress()    { curl -sk -o /dev/null --max-time 6 "$1"; }   # 0 = any HTTP answer came back
@@ -533,7 +611,14 @@ else
     chk "connected: HTTPS by IP works with the lock on" 'egress https://1.1.1.1/'
     "$MV" disconnect --wait >/dev/null 2>&1; sleep 3
     echo "  info: after Mullvad disconnect: $(pfq -s info | head -1 | cut -c1-16), references: $(ntokens)"
-    chk "lock still active after Mullvad disconnects (Mullvad runs pfctl -d)" 'sudo bash $HELPER status && pf_on'
+    # Mullvad's pfctl -d drops our reference; the daemon's 60 s re-run (D5) brings the lock back, so poll
+MVT=-1
+for i in $(seq 0 18); do
+    if sudo bash $HELPER status >/dev/null 2>&1 && pf_on; then MVT=$((i * 5)); break; fi
+    sleep 5
+done
+echo "  info: lock active ${MVT} s after Mullvad disconnected (-1 = not within 90 s), references: $(ntokens)"
+chk "lock active within 90 s after Mullvad disconnects (Mullvad runs pfctl -d; the 60 s daemon re-run restores it)" '[[ "$MVT" -ge 0 ]] && [[ "$(ntokens)" == 1 ]]'
     disable_pf_dns_lock >/dev/null 2>&1
 
     echo "  T28 F9: kill switch on (lockdown mode, tunnel down)"
@@ -558,6 +643,16 @@ else
     chk "F10: enable warns before reloading the main ruleset" 'grep -q "including a VPN kill switch" /tmp/t28-f10.out && grep -q "Reload skipped" /tmp/t28-f10.out'
     chk "F10: declined reload keeps Mullvad's kill switch" 'mv_anchor && ! egress https://1.1.1.1/'
     chk "F10: pf.conf back to baseline, lock active" 'same_conf && sudo bash $HELPER status'
+    disable_pf_dns_lock >/dev/null 2>&1
+
+    echo "  T28 F10 unattended: the same marker, FOXHOLE_ASSUME_YES=1, kill switch still on"
+    prepare_pf_dns_lock_anchor >/dev/null 2>&1
+    printf '\n# ===== hardening dns lock =====\nanchor "com.hardening.dnsleak"\nload anchor "com.hardening.dnsleak" from "/etc/pf.anchors/com.hardening.dnsleak"\n' | sudo tee -a /etc/pf.conf >/dev/null
+    # ask() is stubbed to "yes" in this file: only the guard in front of it can stop the reload
+    FOXHOLE_ASSUME_YES=1 enable_pf_dns_lock 2>&1 | sed 's/\x1b\[[0-9;]*m//g' > /tmp/t28-f10u.out
+    chk "F10 unattended: reload skipped because of other anchors (mullvad named)" 'grep -q "Unattended run" /tmp/t28-f10u.out && grep -q "mullvad" /tmp/t28-f10u.out && grep -q "Reload skipped" /tmp/t28-f10u.out'
+    chk "F10 unattended: Mullvad's anchor still in the main ruleset, https://1.1.1.1 still blocked" 'mv_anchor && ! egress https://1.1.1.1/'
+    chk "F10 unattended: pf.conf back to baseline, lock active" 'same_conf && sudo bash $HELPER status'
     disable_pf_dns_lock >/dev/null 2>&1
 
     "$MV" lockdown-mode set off >/dev/null 2>&1; "$MV" disconnect --wait >/dev/null 2>&1; sleep 3

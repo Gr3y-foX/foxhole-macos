@@ -26,8 +26,8 @@ sudo() {
 }
 prepare_pf_dns_lock_anchor >/dev/null 2>&1
 chk "anchor rendered" '[[ -s "$T/anchor.rules" ]]'
-chk "passes utun0..utun15 explicitly (PF has no utun+ wildcard)" \
-    '[[ "$(grep -c "^pass .* on { utun0 .*utun15 }" "$T/anchor.rules")" == 2 ]] && ! grep -q "utun+" "$T/anchor.rules"'
+chk "anchor has no pass rule in any mode (a quick pass runs before a kill switch, F9)" \
+    '( for m in doh plain vpn; do FOXHOLE_DNS_MODE=$m prepare_pf_dns_lock_anchor >/dev/null 2>&1; grep -qE "^[[:space:]]*pass" "$T/anchor.rules" && exit 1; [[ "$(grep -c "^block out quick on {" "$T/anchor.rules")" == 4 ]] || exit 1; done; true )'
 chk "blocks 53 and 853 on physical interfaces only" \
     '[[ "$(grep -c "^block out quick on {" "$T/anchor.rules")" == 4 ]] && ! grep -E "^block" "$T/anchor.rules" | grep -vq " on {"'
 chk "default mode doh: no Quad9 rule (443 is never blocked; no pass ahead of a kill switch, F9)" \
@@ -95,6 +95,14 @@ sed -n '/^_install_pf_launchdaemon() {/,/^}/p' "$REPO/mac-hardening-netlib.sh" >
 awk "/<< 'EOF'\$/{f=1;next} /^EOF\$/{f=0} f" "$T/ld.fn" > "$T/pf.plist"
 chk "LaunchDaemon plist is well-formed and runs the helper's boot action" \
     'plutil -lint "$T/pf.plist" >/dev/null 2>&1 && grep -q "<string>boot</string>" "$T/pf.plist" && grep -q "<string>${PF_LOCK_HELPER}</string>" "$T/pf.plist" && grep -q "<string>${PF_LOCK_LABEL}</string>" "$T/pf.plist"'
+chk "LaunchDaemon plist re-runs the helper every 60 s and keeps RunAtLoad (N1)" \
+    'grep -q "<key>StartInterval</key>" "$T/pf.plist" && grep -A1 "<key>StartInterval</key>" "$T/pf.plist" | grep -q "<integer>60</integer>" && grep -A1 "<key>RunAtLoad</key>" "$T/pf.plist" | grep -q "<true/>"'
+chk "helper boot: silent fast path (rules loaded + token held) comes before the retry loop (N1)" \
+    'sed -n "/^    boot)/,/^        ;;/p" "$T/helper.sh" > "$T/boot.case"; [[ "$(grep -n "rules_loaded && held_token >/dev/null" "$T/boot.case" | head -1 | cut -d: -f1)" -ge 1 ]] && [[ "$(grep -n "rules_loaded && held_token >/dev/null" "$T/boot.case" | head -1 | cut -d: -f1)" -lt "$(grep -n "until do_start" "$T/boot.case" | head -1 | cut -d: -f1)" ]] && sed -n "/rules_loaded && held_token >\/dev\/null/,/fi/p" "$T/boot.case" | head -3 | grep -q "exit 0"'
+chk "helper boot: the fast path does not log and does not look at main_has_anchor" \
+    '! sed -n "/rules_loaded && held_token >\/dev\/null/,/^        fi/p" "$T/boot.case" | grep -qE "echo|main_has_anchor|do_start"'
+chk "helper boot: the success log line tests grep for is unchanged" \
+    'grep -q "boot: rules loaded into \$ANCHOR, PF reference held (try \$N)" "$T/helper.sh"'
 chk "LaunchDaemon writer reports failure to its caller (F3)" '[[ "$(grep -c "return 1" "$T/ld.fn")" -ge 3 ]]'
 chk "no user-owned staging files left in the PF lock code (F14)" \
     '[[ "$(grep -c "mktemp" "$REPO/mac-hardening-netlib.sh")" == 1 ]] && grep -q "TMP_HOSTS=\$(mktemp)" "$REPO/mac-hardening-netlib.sh"'
@@ -134,6 +142,67 @@ chk "reset runs each step in a subshell (F16)" \
     'grep -q "( disable_pf_dns_lock )" "$REPO/mac-hardening-netlib.sh" && grep -q "( disable_hosts_blocklist )" "$REPO/mac-hardening-netlib.sh"'
 chk "legacy pf.conf reload asks first (F10)" \
     'grep -q "Reload the main PF ruleset now" "$REPO/mac-hardening-netlib.sh"'
+
+echo "== foreign anchors and the unattended legacy reload (D7, audit F10)"
+# The real _pf_legacy_cleanup edits /etc/pf.conf, which this file never touches. The
+# decision it takes is in _pf_foreign_anchors and _pf_confirm_main_reload: test those
+# with pfctl (behind sudo) and ask stubbed.
+(
+    sudo() { case "$1" in pfctl) shift; pfctl_stub "$@" ;; *) return 0 ;; esac; }
+    pfctl_stub() {
+        case "$*" in
+            "-sr") printf '%s\n' 'scrub-anchor "com.apple/*" all fingerprints' 'anchor "com.apple/*" all' 'anchor "mullvad" all' \
+                       'anchor "com.hardening.dnsleak" all' 'anchor "we ird;$(id)"' 'block drop all' ;;
+            *) echo "UNEXPECTED pfctl $*" >> "$T/pfctl.calls" ;;
+        esac
+    }
+    _pf_foreign_anchors > "$T/foreign.out"
+)
+chk "foreign anchors: lists mullvad, drops com.apple/* and the legacy anchor, ignores non-anchor lines" \
+    '[[ "$(sed -n 1p "$T/foreign.out")" == mullvad ]]'
+chk "foreign anchors: untrusted characters are replaced, nothing is executed" \
+    '[[ "$(sed -n 2p "$T/foreign.out")" == "we?ird???id?" ]] && [[ "$(wc -l < "$T/foreign.out" | tr -d " ")" == 2 ]]'
+(
+    sudo() { case "$1" in pfctl) shift; [[ "$*" == "-sr" ]] && printf '%s\n' 'anchor "com.apple/*" all' 'anchor "com.hardening.dnsleak" all' ;; esac; return 0; }
+    _pf_foreign_anchors > "$T/foreign2.out"
+)
+chk "foreign anchors: stock ruleset has none" '[[ ! -s "$T/foreign2.out" ]]'
+(
+    export FOXHOLE_ASSUME_YES=1
+    sudo() { case "$1" in pfctl) shift; [[ "$*" == "-sr" ]] && printf '%s\n' 'anchor "com.apple/*" all' 'anchor "mullvad" all' ;; esac; return 0; }
+    ask() { echo ASK_CALLED >> "$T/unattended.out"; printf -v "$2" '%s' y; }
+    _pf_confirm_main_reload >> "$T/unattended.out" 2>&1
+    echo "rc=$?" >> "$T/unattended.out"
+)
+chk "unattended + foreign anchor: reload refused (rc 1), names the anchor, ask() never called" \
+    'grep -q "^rc=1$" "$T/unattended.out" && grep -q "mullvad" "$T/unattended.out" && grep -q "Unattended run" "$T/unattended.out" && ! grep -q ASK_CALLED "$T/unattended.out"'
+(
+    export FOXHOLE_ASSUME_YES=1
+    sudo() { case "$1" in pfctl) shift; [[ "$*" == "-sr" ]] && printf '%s\n' 'anchor "com.apple/*" all' 'anchor "com.hardening.dnsleak" all' ;; esac; return 0; }
+    _pf_confirm_main_reload > "$T/unattended2.out" 2>&1
+    echo "rc=$?" >> "$T/unattended2.out"
+)
+chk "unattended + stock ruleset only: reload allowed (rc 0)" 'grep -q "^rc=0$" "$T/unattended2.out"'
+(
+    unset FOXHOLE_ASSUME_YES
+    sudo() { case "$1" in pfctl) shift; [[ "$*" == "-sr" ]] && printf '%s\n' 'anchor "com.apple/*" all' 'anchor "mullvad" all' ;; esac; return 0; }
+    ask() { echo ASK_CALLED >> "$T/interactive.out"; printf -v "$2" '%s' N; }
+    _pf_confirm_main_reload >> "$T/interactive.out" 2>&1
+    echo "rc=$?" >> "$T/interactive.out"
+)
+chk "interactive + foreign anchor: the old warning and the question stay, a 'no' skips (rc 1)" \
+    'grep -q "including a VPN kill switch" "$T/interactive.out" && grep -q ASK_CALLED "$T/interactive.out" && grep -q "^rc=1$" "$T/interactive.out"'
+(
+    unset FOXHOLE_ASSUME_YES
+    sudo() { case "$1" in pfctl) shift; [[ "$*" == "-sr" ]] && printf '%s\n' 'anchor "com.apple/*" all' 'anchor "mullvad" all' ;; esac; return 0; }
+    ask() { printf -v "$2" '%s' y; }
+    _pf_confirm_main_reload > "$T/interactive2.out" 2>&1
+    echo "rc=$?" >> "$T/interactive2.out"
+)
+chk "interactive + 'yes': reload allowed (rc 0)" 'grep -q "^rc=0$" "$T/interactive2.out"'
+sed -n '/^_pf_legacy_cleanup() {/,/^}/p' "$REPO/mac-hardening-netlib.sh" > "$T/legacy.fn"
+chk "legacy cleanup: pfctl -f on the main ruleset sits behind _pf_confirm_main_reload, and the skip message stays" \
+    '[[ "$(grep -n "_pf_confirm_main_reload" "$T/legacy.fn" | head -1 | cut -d: -f1)" -ge 1 ]] && [[ "$(grep -n "_pf_confirm_main_reload" "$T/legacy.fn" | head -1 | cut -d: -f1)" -lt "$(grep -n "sudo pfctl -f \"\$PF_CONF\"" "$T/legacy.fn" | head -1 | cut -d: -f1)" ]] && grep -q "Reload skipped" "$T/legacy.fn" && [[ "$(grep -c "pfctl -f" "$T/legacy.fn")" == 1 ]]'
 
 echo "== restore.sh teardown (v0.17.4, audit F1)"
 awk "/<<'RESTORE'\$/{f=1;next} /^RESTORE\$/{f=0} f" "$REPO/mac-hardening-netlib.sh" > "$T/restore.sh"

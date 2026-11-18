@@ -1,6 +1,27 @@
-# Checkpoint — 2026-11-13: weekend handoff (resume here)
+# Checkpoint — 2026-11-18: v0.17.6, D5–D7 done (resume here)
 
 This is the only current resume point. `SESSION_PLAN.md` and `NEXT_SESSION.md` are historical (2026-11-04).
+
+## Done 2026-11-18 (open items 1–4 of the weekend list)
+- netlib **v0.17.6** (`../changelog/v0.17.6.md`), decisions D5–D7 below:
+  - **D5 / N1 fixed:** the boot daemon re-runs `boot` every 60 s; idle runs are silent. Lock back 60 s after `pfctl -d` (T29) and 60 s after Mullvad's disconnect (T28). A manual `pfctl -d` no longer frees you from the lock: disable it instead.
+  - **D6 / rest of F9 fixed:** the anchor has no pass rules; `verify_dns_stack` [2] checks the block rules.
+  - **D7 / F10 unattended fixed:** `FOXHOLE_ASSUME_YES=1` never reloads the main ruleset over a foreign anchor (T30, T28).
+- `tests/vm/run.sh` / `vm.sh`: wait for a working SSH login after boot (item 4; it had blocked a run again).
+- T12 rewritten: proves the tunnel query passes with a tcpdump capture on `utun3` (the old counter caught the VM's own resolver traffic).
+- Tests: VM **216 / 0 / 0 + 12 / 0 / 0** on `foxhole-mullvad`, bridged (`../testing/logs/vm-test-2026-11-18_150037.log`, report `../testing/reports/vm-test-report-2026-11-18.md`); offline 62 / 62. T17 Quad9 check passed (item 5: keep watching).
+- Work split: `coder` wrote code and tests, `docs-scout` read the plan and wrote the report, `github-ops` does git; Opus decided, reviewed every diff and ran the VM.
+
+## Still open
+- Commit + push v0.17.6 to `debug` (pending the user's go when this was written).
+- **CLAUDE.md / AGENTS.md:** utun pass rule is obsolete (D6), version still v0.17.4, "PR #1 open" is stale, and "main ruleset never reloaded" needs the F10 migration exception. User edits.
+- `private-all` is behind `debug`; ask before syncing.
+- Uncommitted 2026-11-11 doc sync in worktree `claude/multi-agent-doc-parsing-f0f8cc` (review on the Mac).
+- Existing installs keep the old rules and plist until the lock is disabled and enabled once.
+
+---
+
+# Checkpoint — 2026-11-13: weekend handoff
 
 ## State (checked 2026-11-13)
 - `main` = `origin/main` = `5b20e03` (v0.17.4, **PR #1 merged**). No PR is open.
@@ -14,6 +35,11 @@ This is the only current resume point. `SESSION_PLAN.md` and `NEXT_SESSION.md` a
 - Agent team definitions: `agents/` (copies; see `agents/README.md` to install them in `.claude/agents/`).
 - Not possible remotely: anything in the Tart VM (images live on the SSD at home), so no `tests/vm/run.sh`. Offline checks (`bash tests/ci/offline.sh`) need macOS; CI runs them on push.
 - Good remote work: analysis and design for the open items, offline-checkable changes, docs. Mark anything that needs a VM run as "VM run pending" in the commit and here.
+
+## User decisions 2026-11-18 (open items 1–3)
+- **D5 (N1):** the boot LaunchDaemon re-runs the idempotent helper `boot` every 60 s (`StartInterval`), so the lock comes back within a minute after another program's `pfctl -d`.
+- **D6 (rest of F9):** drop the `lo0`, `utun0–15` and ICMPv6 quick passes. `verify_dns_stack` [2] checks the block rules instead. CLAUDE.md's utun design rule needs the user's edit.
+- **D7 (F10 unattended):** with `FOXHOLE_ASSUME_YES=1`, skip the main-ruleset reload when the main ruleset has an anchor other than `com.apple/*` (e.g. `mullvad`), and say so. Interactive runs still ask.
 
 ## Open (ask the user for the order)
 1. **N1 (new, not in the audit):** Mullvad's disconnect runs `pfctl -d`: PF off, our reference gone, the lock inert until reboot or re-enable. T28 check "lock still active after Mullvad disconnects" fails on purpose. Needs a design decision: re-enable when PF goes off (watcher daemon?), warn in `verify_dns_stack`, or document.
